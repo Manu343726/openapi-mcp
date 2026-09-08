@@ -426,7 +426,7 @@ func TestLoadSwagger(t *testing.T) {
 			content:       malformedJSON,
 			fileName:      "malformed.json",
 			expectError:   true,
-			containsError: "failed to parse JSON",
+			containsError: "failed",
 		},
 		{
 			name:          "No version key JSON file",
@@ -469,7 +469,7 @@ func TestLoadSwagger(t *testing.T) {
 			name:          "Malformed JSON URL",
 			content:       malformedJSON,
 			expectError:   true,
-			containsError: "failed to parse JSON",
+			containsError: "failed",
 			isURLTest:     true,
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
@@ -562,6 +562,44 @@ func TestLoadSwagger(t *testing.T) {
 }
 
 // TODO: Add tests for GenerateToolSet
+func TestLoadSwaggerFromBytes(t *testing.T) {
+	tests := []struct {
+		name          string
+		content       string
+		expectError   bool
+		expectVersion string
+		containsError string
+	}{
+		{name: "Valid V3 JSON", content: minimalV3SpecJSON, expectVersion: VersionV3},
+		{name: "Valid V2 JSON", content: minimalV2SpecJSON, expectVersion: VersionV2},
+		{name: "Malformed JSON", content: malformedJSON, expectError: true, containsError: "failed"},
+		{name: "No version key", content: noVersionKeyJSON, expectError: true, containsError: "missing 'openapi' or 'swagger' key"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			specDoc, version, err := LoadSwaggerFromBytes([]byte(tc.content), "inline")
+			if tc.expectError {
+				assert.Error(t, err)
+				if tc.containsError != "" {
+					assert.Contains(t, err.Error(), tc.containsError)
+				}
+				assert.Nil(t, specDoc)
+				assert.Empty(t, version)
+				return
+			}
+			assert.NoError(t, err)
+			assert.NotNil(t, specDoc)
+			assert.Equal(t, tc.expectVersion, version)
+			if version == VersionV3 {
+				assert.IsType(t, &openapi3.T{}, specDoc)
+			} else {
+				assert.IsType(t, &spec.Swagger{}, specDoc)
+			}
+		})
+	}
+}
+
 func TestGenerateToolSet(t *testing.T) {
 	// --- Load Specs Once ---
 	// Load V3 spec (error checked in TestLoadSwagger)

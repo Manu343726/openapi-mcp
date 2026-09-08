@@ -39,6 +39,13 @@ type Config struct {
 
 	// Server-side request modification
 	CustomHeaders string // Comma-separated list of headers (e.g., "Header1:Value1,Header2:Value2") to add to outgoing requests.
+
+	// Session token (login-derived) injected into outgoing requests. This is a
+	// per-call value computed by the registry's login flow, not stored config.
+	SessionToken         string         // The token value returned by the API's login operation.
+	SessionTokenName     string         // Header/query/cookie parameter name (default "Authorization").
+	SessionTokenLocation APIKeyLocation // Where to attach it (default header).
+	SessionTokenPrefix   string         // Prefix prepended to the value (default "Bearer " for Authorization).
 }
 
 // GetAPIKey resolves the API key value, prioritizing the environment variable over the direct flag.

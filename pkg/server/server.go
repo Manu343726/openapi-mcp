@@ -34,7 +34,11 @@ type jsonRPCResponse struct {
 	Jsonrpc string      `json:"jsonrpc"`
 	Result  interface{} `json:"result,omitempty"`
 	Error   *jsonError  `json:"error,omitempty"`
-	ID      interface{} `json:"id"` // ID should match the request ID
+	ID      interface{} `json:"id,omitempty"` // Omitted for server->client notifications
+	// Method/Params are populated for server->client notifications (e.g.
+	// notifications/tools/list_changed), which carry no id.
+	Method string      `json:"method,omitempty"`
+	Params interface{} `json:"params,omitempty"`
 }
 
 type jsonError struct {
@@ -92,14 +96,21 @@ type ToolResultPayload struct {
 var activeConnections = make(map[string]chan jsonRPCResponse) // Changed value type
 var connMutex sync.RWMutex
 
+// initializedConnections tracks which sessions completed the MCP 'initialize'
+// handshake. tools/list_changed notifications are only meaningful to them.
+var initializedConnections = make(map[string]bool)
+
 // Channel buffer size
 const messageChannelBufferSize = 10
 
 // --- Server Implementation ---
 
-// ServeMCP starts an HTTP server handling MCP communication.
-func ServeMCP(addr string, toolSet *mcp.ToolSet, cfg *config.Config) error {
-	log.Printf("Preparing ToolSet for MCP...")
+// ServeMCP starts an HTTP server handling MCP communication for a Registry.
+func ServeMCP(addr string, reg *Registry) error {
+	if reg == nil {
+		return fmt.Errorf("registry is required")
+	}
+	log.Printf("Preparing registry with %d API(s) for MCP...", len(reg.APIs()))
 
 	// --- Handler Functions ---
 	mcpHandler := func(w http.ResponseWriter, r *http.Request) {
@@ -116,9 +127,9 @@ func ServeMCP(addr string, toolSet *mcp.ToolSet, cfg *config.Config) error {
 		}
 
 		if r.Method == http.MethodGet {
-			httpMethodGetHandler(w, r) // Handle SSE connection setup
+			httpMethodGetHandler(w, r, reg) // Handle SSE connection setup
 		} else if r.Method == http.MethodPost {
-			httpMethodPostHandler(w, r, toolSet, cfg) // Pass the cfg object here
+			httpMethodPostHandler(w, r, reg)
 		} else {
 			log.Printf("Method Not Allowed: %s", r.Method)
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -134,7 +145,7 @@ func ServeMCP(addr string, toolSet *mcp.ToolSet, cfg *config.Config) error {
 }
 
 // httpMethodGetHandler handles the initial GET request to establish the SSE connection.
-func httpMethodGetHandler(w http.ResponseWriter, r *http.Request) {
+func httpMethodGetHandler(w http.ResponseWriter, r *http.Request, regs ...*Registry) {
 	connectionID := uuid.New().String()
 	log.Printf("SSE client connecting: %s (Assigning ID: %s)", r.RemoteAddr, connectionID)
 
@@ -195,11 +206,14 @@ func httpMethodGetHandler(w http.ResponseWriter, r *http.Request) {
 	connMutex.Unlock()
 	log.Printf("Registered channel for connection %s. Active connections: %d", connectionID, len(activeConnections))
 
-	// --- Cleanup function ---
 	cleanup := func() {
 		connMutex.Lock()
 		delete(activeConnections, connectionID)
+		delete(initializedConnections, connectionID)
 		connMutex.Unlock()
+		if len(regs) > 0 && regs[0] != nil {
+			regs[0].DropSession(connectionID)
+		}
 		close(msgChan) // Close channel when connection ends
 		log.Printf("Removed connection %s. Active connections: %d", connectionID, len(activeConnections))
 	}
@@ -298,8 +312,13 @@ func writeSSEEvent(w http.ResponseWriter, eventName string, data interface{}) er
 }
 
 // httpMethodPostHandler handles incoming POST requests containing MCP messages.
-func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, toolSet *mcp.ToolSet, cfg *config.Config) {
-	// --- Original Logic (Restored) ---
+// It supports two transports:
+//   - legacy SSE: POSTs carry an X-Connection-ID (or sessionId) established by
+//     a streaming GET; responses are queued to that connection's SSE channel.
+//   - streamable HTTP: a POST without a connection id is handled synchronously
+//     and answered with a JSON-RPC body (this is what modern clients such as
+//     opencode use).
+func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, reg *Registry) {
 	connID := r.Header.Get("X-Connection-ID") // Try header first
 	if connID == "" {
 		connID = r.URL.Query().Get("sessionId") // Fallback to query parameter
@@ -307,8 +326,7 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, toolSet *mcp.
 	}
 
 	if connID == "" {
-		log.Println("Error: POST request received without X-Connection-ID header or sessionId query parameter")
-		http.Error(w, "Missing X-Connection-ID header or sessionId query parameter", http.StatusBadRequest)
+		handleStreamableRequest(w, r, reg)
 		return
 	}
 
@@ -411,38 +429,15 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, toolSet *mcp.
 	// --- Variable to hold the final response to be sent via SSE ---
 	var respToSend jsonRPCResponse
 
-	// --- Validate JSON-RPC Request ---
-	if req.Jsonrpc != "2.0" {
-		log.Printf("Invalid JSON-RPC version ('%s') for %s, ID: %v", req.Jsonrpc, connID, reqID)
-		respToSend = createJSONRPCError(reqID, -32600, "Invalid Request: jsonrpc field must be \"2.0\"", nil)
-	} else if req.Method == "" {
-		log.Printf("Missing JSON-RPC method for %s, ID: %v", connID, reqID)
-		respToSend = createJSONRPCError(reqID, -32600, "Invalid Request: method field is missing or empty", nil)
-	} else {
-		// --- Process the valid request ---
-		log.Printf("Processing JSON-RPC message for %s: Method=%s, ID=%v", connID, req.Method, reqID)
-		switch req.Method {
-		case "initialize":
-			incomingInitializeJSON, _ := json.Marshal(req)
-			log.Printf("DEBUG: Handling 'initialize' for %s. Incoming request: %s", connID, string(incomingInitializeJSON))
-			respToSend = handleInitializeJSONRPC(connID, &req)
-			outgoingInitializeJSON, _ := json.Marshal(respToSend)
-			log.Printf("DEBUG: Prepared 'initialize' response for %s. Outgoing response: %s", connID, string(outgoingInitializeJSON))
-		case "notifications/initialized":
-			log.Printf("Received 'notifications/initialized' notification for %s. Ignoring.", connID)
-			w.WriteHeader(http.StatusAccepted)
-			fmt.Fprintln(w, "Notification received.")
-			return // Return early, do not send anything on SSE channel
-		case "logging/setLevel":
-			respToSend = handleLoggingSetLevelJSONRPC(connID, &req)
-		case "tools/list":
-			respToSend = handleToolsListJSONRPC(connID, &req, toolSet)
-		case "tools/call":
-			respToSend = handleToolCallJSONRPC(connID, &req, toolSet, cfg)
-		default:
-			log.Printf("Received unknown JSON-RPC method '%s' for %s", req.Method, connID)
-			respToSend = createJSONRPCError(reqID, -32601, fmt.Sprintf("Method not found: %s", req.Method), nil)
-		}
+	// --- Validate JSON-RPC Request & dispatch ---
+	var isNotification bool
+	respToSend, isNotification = dispatchJSONRPC(connID, &req, reqID, reg)
+
+	if isNotification {
+		log.Printf("Notification %q received for %s. Ignoring.", req.Method, connID)
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprintln(w, "Notification received.")
+		return
 	}
 
 	// --- Send response ASYNCHRONOUSLY via SSE channel (unless handled earlier) ---
@@ -459,19 +454,137 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, toolSet *mcp.
 	}
 }
 
+// dispatchJSONRPC validates a parsed JSON-RPC request and runs it against the
+// registry, returning the response to send. It returns isNotification=true for
+// requests that have no response (e.g. notifications/initialized).
+func dispatchJSONRPC(connID string, req *jsonRPCRequest, reqID interface{}, reg *Registry) (jsonRPCResponse, bool) {
+	if req.Jsonrpc != "2.0" {
+		log.Printf("Invalid JSON-RPC version ('%s') for %s, ID: %v", req.Jsonrpc, connID, reqID)
+		return createJSONRPCError(reqID, -32600, "Invalid Request: jsonrpc field must be \"2.0\"", nil), false
+	}
+	if req.Method == "" {
+		log.Printf("Missing JSON-RPC method for %s, ID: %v", connID, reqID)
+		return createJSONRPCError(reqID, -32600, "Invalid Request: method field is missing or empty", nil), false
+	}
+
+	log.Printf("Processing JSON-RPC message for %s: Method=%s, ID=%v", connID, req.Method, reqID)
+	switch req.Method {
+	case "initialize":
+		incomingInitializeJSON, _ := json.Marshal(req)
+		log.Printf("DEBUG: Handling 'initialize' for %s. Incoming request: %s", connID, string(incomingInitializeJSON))
+		markConnectionInitialized(connID)
+		resp := handleInitializeJSONRPC(connID, req)
+		outgoingInitializeJSON, _ := json.Marshal(resp)
+		log.Printf("DEBUG: Prepared 'initialize' response for %s. Outgoing response: %s", connID, string(outgoingInitializeJSON))
+		return resp, false
+	case "notifications/initialized":
+		return jsonRPCResponse{}, true // no response to send
+	case "logging/setLevel":
+		return handleLoggingSetLevelJSONRPC(connID, req), false
+	case "tools/list":
+		return handleToolsListJSONRPC(connID, req, reg), false
+	case "tools/call":
+		return handleToolCallJSONRPC(connID, req, reg), false
+	case "ping":
+		return jsonRPCResponse{Jsonrpc: "2.0", ID: req.ID, Result: map[string]interface{}{}}, false
+	default:
+		log.Printf("Received unknown JSON-RPC method '%s' for %s", req.Method, connID)
+		return createJSONRPCError(reqID, -32601, fmt.Sprintf("Method not found: %s", req.Method), nil), false
+	}
+}
+
+// handleStreamableRequest serves a single JSON-RPC POST synchronously, the way
+// the MCP streamable HTTP transport works (a JSON body in, a JSON body out; no
+// separate SSE session needed).
+func handleStreamableRequest(w http.ResponseWriter, r *http.Request, reg *Registry) {
+	if r.Body == nil {
+		http.Error(w, "empty body", http.StatusBadRequest)
+		return
+	}
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	// Support both single requests and JSON-RPC batches.
+	var raw interface{}
+	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(createJSONRPCError(nil, -32700, "Parse error decoding JSON request", err.Error()))
+		return
+	}
+
+	respond := func(resp jsonRPCResponse) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+	}
+
+	if arr, ok := raw.([]interface{}); ok {
+		// Batch: respond with an array of results.
+		var responses []jsonRPCResponse
+		for _, item := range arr {
+			resp, isNotification := dispatchRawItem(r, item, reg)
+			if !isNotification {
+				responses = append(responses, resp)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(responses)
+		return
+	}
+
+	resp, isNotification := dispatchRawItem(r, raw, reg)
+	if isNotification {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	respond(resp)
+}
+
+// dispatchRawItem unmarshals one JSON-RPC request object and dispatches it.
+func dispatchRawItem(r *http.Request, item interface{}, reg *Registry) (jsonRPCResponse, bool) {
+	reqBytes, err := json.Marshal(item)
+	if err != nil {
+		return createJSONRPCError(nil, -32600, "Invalid request", nil), false
+	}
+	var reqID interface{}
+	if m, ok := item.(map[string]interface{}); ok {
+		if idVal, has := m["id"]; has && idVal != nil {
+			reqID = idVal
+		}
+	}
+	var req jsonRPCRequest
+	if err := json.Unmarshal(reqBytes, &req); err != nil {
+		return createJSONRPCError(reqID, -32600, "Invalid Request", err.Error()), false
+	}
+	return dispatchJSONRPC("", &req, reqID, reg)
+}
+
 // --- JSON-RPC Message Handlers --- // Implementations returning jsonRPCResponse
 
 func handleInitializeJSONRPC(connID string, req *jsonRPCRequest) jsonRPCResponse {
 	log.Printf("Handling 'initialize' (JSON-RPC) for %s", connID)
 
+	// Honor the protocol version the client asked for if we support it.
+	protocolVersion := "2024-11-05"
+	if params, ok := req.Params.(map[string]interface{}); ok {
+		if v, ok := params["protocolVersion"].(string); ok && v != "" {
+			protocolVersion = v
+		}
+	}
+
 	// Construct the result payload based on gin-mcp's structure using map[string]interface{}
 	resultPayload := map[string]interface{}{
-		"protocolVersion": "2024-11-05", // Aligning with gin-mcp
+		"protocolVersion": protocolVersion,
 		"capabilities": map[string]interface{}{
 			"tools": map[string]interface{}{
 				"enabled": true,
 				"config": map[string]interface{}{
-					"listChanged": false,
+					"listChanged": true,
 				},
 			},
 			"prompts": map[string]interface{}{
@@ -488,9 +601,8 @@ func handleInitializeJSONRPC(connID string, req *jsonRPCRequest) jsonRPCResponse
 			},
 		},
 		"serverInfo": map[string]interface{}{
-			"name":       "OpenAPI-MCP",       // Or use config name if available
-			"version":    "openapi-mcp-0.1.0", // Your server version
-			"apiVersion": "2024-11-05",        // MCP API version
+			"name":    "OpenAPI-MCP",       // Or use config name if available
+			"version": "openapi-mcp-0.1.0", // Your server version
 		},
 		"connectionId": connID, // Include the connection ID
 	}
@@ -502,15 +614,15 @@ func handleInitializeJSONRPC(connID string, req *jsonRPCRequest) jsonRPCResponse
 	}
 }
 
-func handleToolsListJSONRPC(connID string, req *jsonRPCRequest, toolSet *mcp.ToolSet) jsonRPCResponse {
+func handleToolsListJSONRPC(connID string, req *jsonRPCRequest, reg *Registry) jsonRPCResponse {
 	log.Printf("Handling 'tools/list' (JSON-RPC) for %s", connID)
 
 	// Construct the result payload based on gin-mcp's structure
 	resultPayload := map[string]interface{}{
-		"tools": toolSet.Tools,
+		"tools": reg.Tools(),
 		"metadata": map[string]interface{}{
 			"version": "2024-11-05", // Align with gin-mcp if possible
-			"count":   len(toolSet.Tools),
+			"count":   len(reg.Tools()),
 		},
 	}
 
@@ -533,7 +645,7 @@ func handleLoggingSetLevelJSONRPC(connID string, req *jsonRPCRequest) jsonRPCRes
 
 // executeToolCall performs the actual HTTP request based on the resolved operation and parameters.
 // It now correctly handles API key injection based on the *cfg* parameter.
-func executeToolCall(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.Config) (*http.Response, error) {
+func buildToolRequest(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.Config) (*http.Request, error) {
 	toolName := params.ToolName
 	toolInput := params.Input // This is the map[string]interface{} from the client
 
@@ -682,6 +794,32 @@ func executeToolCall(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.C
 		log.Printf("[ExecuteToolCall] Skipping server API key injection (config incomplete or key unresolved).")
 	}
 
+	// --- Inject Session Token (login-derived, if present) ---
+	if cfg.SessionToken != "" {
+		token := cfg.SessionTokenPrefix + cfg.SessionToken
+		switch cfg.SessionTokenLocation {
+		case config.APIKeyLocationQuery:
+			queryParams.Set(cfg.SessionTokenName, token)
+			log.Printf("[ExecuteToolCall] Injected session token '%s' into query parameters", cfg.SessionTokenName)
+		case config.APIKeyLocationCookie:
+			foundCookie := false
+			for i, c := range cookieParams {
+				if c.Name == cfg.SessionTokenName {
+					cookieParams[i] = &http.Cookie{Name: cfg.SessionTokenName, Value: token}
+					foundCookie = true
+					break
+				}
+			}
+			if !foundCookie {
+				cookieParams = append(cookieParams, &http.Cookie{Name: cfg.SessionTokenName, Value: token})
+			}
+			log.Printf("[ExecuteToolCall] Injected session token into cookie '%s'", cfg.SessionTokenName)
+		default: // header
+			headerParams.Set(cfg.SessionTokenName, token)
+			log.Printf("[ExecuteToolCall] Injected session token '%s' into headers", cfg.SessionTokenName)
+		}
+	}
+
 	// --- Final URL Construction ---
 	// Reconstruct query string *after* potential API key injection
 	targetURL := baseURL + path
@@ -748,12 +886,20 @@ func executeToolCall(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.C
 		req.AddCookie(cookie)
 	}
 
-	log.Printf("[ExecuteToolCall] Sending request with headers: %v", req.Header)
+	log.Printf("[ExecuteToolCall] Prepared request with headers: %v", req.Header)
 	if len(req.Cookies()) > 0 {
-		log.Printf("[ExecuteToolCall] Sending request with cookies: %+v", req.Cookies())
+		log.Printf("[ExecuteToolCall] Request cookies: %+v", req.Cookies())
 	}
 
-	// --- Execute HTTP Request ---
+	return req, nil
+}
+
+// executeToolCall builds an *http.Request and sends it.
+func executeToolCall(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.Config) (*http.Response, error) {
+	req, err := buildToolRequest(params, toolSet, cfg)
+	if err != nil {
+		return nil, err
+	}
 	log.Printf("[ExecuteToolCall] Sending request with headers: %v", req.Header)
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
@@ -761,13 +907,12 @@ func executeToolCall(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.C
 		log.Printf("[ExecuteToolCall] Error executing HTTP request: %v", err)
 		return nil, fmt.Errorf("error executing request: %w", err)
 	}
-
 	log.Printf("[ExecuteToolCall] Request executed. Status Code: %d", resp.StatusCode)
 	// Note: Don't close resp.Body here, the caller (handleToolCallJSONRPC) needs it.
 	return resp, nil
 }
 
-func handleToolCallJSONRPC(connID string, req *jsonRPCRequest, toolSet *mcp.ToolSet, cfg *config.Config) jsonRPCResponse {
+func handleToolCallJSONRPC(connID string, req *jsonRPCRequest, reg *Registry) jsonRPCResponse {
 	// req.Params is interface{}, but should contain json.RawMessage for tools/call
 	rawParams, ok := req.Params.(json.RawMessage)
 	if !ok {
@@ -799,84 +944,17 @@ func handleToolCallJSONRPC(connID string, req *jsonRPCRequest, toolSet *mcp.Tool
 	log.Printf("Executing tool '%s' for %s with input: %+v", params.ToolName, connID, params.Input)
 
 	// --- Execute the actual tool call ---
-	httpResp, execErr := executeToolCall(&params, toolSet, cfg)
-
-	// --- Process Response ---
 	var resultPayload ToolResultPayload
-	if execErr != nil {
-		log.Printf("Error executing tool call '%s': %v", params.ToolName, execErr)
-		// Populate content with error message
-		resultContent := []ToolResultContent{
-			{
-				Type: "text",
-				Text: fmt.Sprintf("Failed to execute tool '%s': %v", params.ToolName, execErr),
-			},
+	if reg.IsManagementTool(params.ToolName) {
+		res := reg.runManagementTool(connID, params.ToolName, params.Input)
+		text := res.text
+		if !res.ok {
+			text = fmt.Sprintf("Failed to execute tool '%s': %s", params.ToolName, text)
 		}
-		resultPayload = ToolResultPayload{
-			Content:    resultContent,
-			IsError:    true,
-			Error: &MCPError{
-				Message: fmt.Sprintf("Failed to execute tool '%s': %v", params.ToolName, execErr),
-			},
-			ToolCallID: fmt.Sprintf("%v", req.ID),
-		}
+		resultPayload = toolResultPayload(params.ToolName, req.ID, res.ok, text)
 	} else {
-		defer httpResp.Body.Close() // Ensure body is closed
-		bodyBytes, readErr := io.ReadAll(httpResp.Body)
-		if readErr != nil {
-			log.Printf("Error reading response body for tool '%s': %v", params.ToolName, readErr)
-			// Populate content with error message
-			resultContent := []ToolResultContent{
-				{
-					Type: "text",
-					Text: fmt.Sprintf("Failed to read response from tool '%s': %v", params.ToolName, readErr),
-				},
-			}
-			resultPayload = ToolResultPayload{
-				Content:    resultContent,
-				IsError:    true,
-				Error: &MCPError{
-					Message: fmt.Sprintf("Failed to read response from tool '%s': %v", params.ToolName, readErr),
-				},
-				ToolCallID: fmt.Sprintf("%v", req.ID),
-			}
-		} else {
-			log.Printf("Received response body for tool '%s': %s", params.ToolName, string(bodyBytes))
-			// Check status code for API-level errors
-			if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-				// Error case: populate content with the error response body
-				resultContent := []ToolResultContent{
-					{
-						Type: "text",
-						Text: string(bodyBytes),
-					},
-				}
-				resultPayload = ToolResultPayload{
-					Content:    resultContent,
-					IsError:    true,
-					StatusCode: httpResp.StatusCode,
-					Error: &MCPError{
-						Code:    httpResp.StatusCode,
-						Message: fmt.Sprintf("Tool '%s' API call failed with status %s", params.ToolName, httpResp.Status),
-					},
-					ToolCallID: fmt.Sprintf("%v", req.ID),
-				}
-			} else {
-				// Successful execution
-				resultContent := []ToolResultContent{
-					{
-						Type: "text", // TODO: Handle JSON responses properly if Content-Type indicates it
-						Text: string(bodyBytes),
-					},
-				}
-				resultPayload = ToolResultPayload{
-					Content:    resultContent,
-					StatusCode: httpResp.StatusCode,
-					IsError:    false,
-					ToolCallID: fmt.Sprintf("%v", req.ID),
-				}
-			}
-		}
+		httpResp, execErr := executeRegisteredTool(reg, connID, &params)
+		resultPayload = toolResultFromHTTP(params.ToolName, req.ID, httpResp, execErr)
 	}
 
 	// --- Send Response ---
@@ -885,6 +963,125 @@ func handleToolCallJSONRPC(connID string, req *jsonRPCRequest, toolSet *mcp.Tool
 		ID:      req.ID,        // Match request ID
 		Result:  resultPayload, // Use the actual result payload
 	}
+}
+
+// executeRegisteredTool resolves a fully qualified tool name to its API entry,
+// selects the target (the API's active target, or the explicit 'target'
+// argument) and executes the HTTP request against that target. When the target
+// authenticates via a login endpoint, a session token is obtained first and
+// attached to the request.
+func executeRegisteredTool(reg *Registry, connID string, params *ToolCallParams) (*http.Response, error) {
+	req, _, err := buildRegisteredRequestFor(reg, connID, params)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	return client.Do(req)
+}
+
+// buildRegisteredRequest resolves a fully qualified tool name against the
+// registry, applies target + auth, and returns the constructed *http.Request
+// (without sending it) plus the resolved target name. Used both for execution
+// and for dry-run/preview.
+func buildRegisteredRequest(reg *Registry, params *ToolCallParams) (*http.Request, string, error) {
+	return buildRegisteredRequestFor(reg, "", params)
+}
+
+func buildRegisteredRequestFor(reg *Registry, connID string, params *ToolCallParams) (*http.Request, string, error) {
+	api, tool, ok := reg.ResolveTool(params.ToolName)
+	if !ok {
+		return nil, "", fmt.Errorf("operation details for tool '%s' not found", params.ToolName)
+	}
+	cleanArgs, target, targetCfg, err := reg.prepareCallArgsFor(connID, api, params.Input)
+	if err != nil {
+		return nil, "", err
+	}
+
+	// Apply the API's authentication scheme using this target's credentials
+	// (static API key, HTTP basic, or login/oauth2-derived session token).
+	// Skip auth entirely when the called tool IS the API's login operation --
+	// otherwise we'd try to authenticate to call the login endpoint itself.
+	isLoginOp := tool.Name != "" && tool.Name == loginOperationFor(api)
+	if !isLoginOp {
+		if err := reg.applyAuthToConfig(api, target, targetCfg); err != nil {
+			return nil, "", err
+		}
+	}
+
+	// Build against the bare tool name so the owning ToolSet's Operations map
+	// resolves correctly; the synthetic 'target' argument was stripped above.
+	local := *params
+	local.ToolName = tool.Name
+	local.Input = cleanArgs
+	req, err := buildToolRequest(&local, api.ToolSet, targetCfg)
+	if err != nil {
+		return nil, "", err
+	}
+	return req, target.Name, nil
+}
+
+// toolResultFromHTTP converts an executed HTTP call into a ToolResultPayload.
+func toolResultFromHTTP(toolName string, reqID interface{}, httpResp *http.Response, execErr error) ToolResultPayload {
+	var resultPayload ToolResultPayload
+	if execErr != nil {
+		log.Printf("Error executing tool call '%s': %v", toolName, execErr)
+		msg := fmt.Sprintf("Failed to execute tool '%s': %v", toolName, execErr)
+		resultPayload = ToolResultPayload{
+			Content:    []ToolResultContent{{Type: "text", Text: msg}},
+			IsError:    true,
+			Error:      &MCPError{Message: msg},
+			ToolCallID: fmt.Sprintf("%v", reqID),
+		}
+		return resultPayload
+	}
+
+	defer httpResp.Body.Close() // Ensure body is closed
+	bodyBytes, readErr := io.ReadAll(httpResp.Body)
+	if readErr != nil {
+		log.Printf("Error reading response body for tool '%s': %v", toolName, readErr)
+		msg := fmt.Sprintf("Failed to read response from tool '%s': %v", toolName, readErr)
+		return ToolResultPayload{
+			Content:    []ToolResultContent{{Type: "text", Text: msg}},
+			IsError:    true,
+			Error:      &MCPError{Message: msg},
+			ToolCallID: fmt.Sprintf("%v", reqID),
+		}
+	}
+
+	log.Printf("Received response body for tool '%s': %s", toolName, string(bodyBytes))
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		// Error case: surface the API's error response body.
+		return ToolResultPayload{
+			Content:    []ToolResultContent{{Type: "text", Text: string(bodyBytes)}},
+			IsError:    true,
+			StatusCode: httpResp.StatusCode,
+			Error: &MCPError{
+				Code:    httpResp.StatusCode,
+				Message: fmt.Sprintf("Tool '%s' API call failed with status %s", toolName, httpResp.Status),
+			},
+			ToolCallID: fmt.Sprintf("%v", reqID),
+		}
+	}
+	return ToolResultPayload{
+		Content:    []ToolResultContent{{Type: "text", Text: string(bodyBytes)}}, // TODO: Handle JSON responses properly if Content-Type indicates it
+		StatusCode: httpResp.StatusCode,
+		IsError:    false,
+		ToolCallID: fmt.Sprintf("%v", reqID),
+	}
+}
+
+// toolResultPayload builds a ToolResultPayload from an explicit text result
+// (used by the registry management tools).
+func toolResultPayload(toolName string, reqID interface{}, ok bool, text string) ToolResultPayload {
+	payload := ToolResultPayload{
+		Content:    []ToolResultContent{{Type: "text", Text: text}},
+		ToolCallID: fmt.Sprintf("%v", reqID),
+	}
+	if !ok {
+		payload.IsError = true
+		payload.Error = &MCPError{Message: text}
+	}
+	return payload
 }
 
 // --- Helper Functions (Updated for JSON-RPC) ---
@@ -945,4 +1142,41 @@ func tryWriteHTTPError(w http.ResponseWriter, code int, message string) {
 		log.Printf("Error writing plain HTTP error response: %v", err)
 	}
 	log.Printf("Sent plain HTTP error: %s (Code: %d)", message, code)
+}
+
+// broadcastToolsListChanged pushes a notifications/tools/list_changed message to
+// every connected SSE client so they re-issue tools/list after a registry
+// mutation. Delivery is best-effort: if a client's channel is full the
+// notification is dropped (the client can still re-fetch on its next request).
+func broadcastToolsListChanged() {
+	notification := jsonRPCResponse{
+		Jsonrpc: "2.0",
+		Method:  "notifications/tools/list_changed",
+	}
+	connMutex.RLock()
+	defer connMutex.RUnlock()
+	for connID, ch := range activeConnections {
+		if !initializedConnections[connID] {
+			continue // client has not completed 'initialize'; a list_changed is meaningless
+		}
+		select {
+		case ch <- notification:
+			log.Printf("Sent notifications/tools/list_changed to %s", connID)
+		default:
+			log.Printf("Warning: dropped notifications/tools/list_changed for %s (channel full)", connID)
+		}
+	}
+}
+
+// markConnectionInitialized records that a session completed the initialize
+// handshake, making it eligible for tools/list_changed notifications.
+func markConnectionInitialized(connID string) {
+	if connID == "" {
+		return
+	}
+	connMutex.Lock()
+	defer connMutex.Unlock()
+	if _, active := activeConnections[connID]; active {
+		initializedConnections[connID] = true
+	}
 }

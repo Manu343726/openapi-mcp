@@ -22,3 +22,5 @@ go.work.sum
 .env
 *.env
 !.env.example
+# Runtime state (created on first start)
+deploy/config/

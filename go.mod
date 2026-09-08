@@ -9,8 +9,8 @@ require (
 	github.com/go-openapi/loads v0.22.0
 	github.com/go-openapi/spec v0.21.0
 	github.com/google/uuid v1.6.0
-	github.com/joho/godotenv v1.5.1
 	github.com/stretchr/testify v1.9.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -32,5 +32,4 @@ require (
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	go.mongodb.org/mongo-driver v1.14.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

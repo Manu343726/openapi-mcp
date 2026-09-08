@@ -2,7 +2,6 @@ package parser
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -18,12 +17,33 @@ import (
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/go-openapi/loads"
 	"github.com/go-openapi/spec"
+	"gopkg.in/yaml.v3"
 )
 
 const (
 	VersionV2 = "v2"
 	VersionV3 = "v3"
 )
+
+// detectVersion returns the top-level keys of a spec document when it can be
+// parsed. It is tolerant of both YAML and JSON (YAML is a superset of JSON),
+// so YAML specs remain detectable.
+func detectVersion(data []byte) (map[string]interface{}, error) {
+	detector := map[string]interface{}{}
+	if err := detectVersionInto(data, &detector); err != nil {
+		return nil, err
+	}
+	return detector, nil
+}
+
+// detectVersionInto parses a spec document into a generic map, accepting both
+// JSON and YAML.
+func detectVersionInto(data []byte, out *map[string]interface{}) error {
+	if err := yaml.Unmarshal(data, out); err != nil {
+		return err
+	}
+	return nil
+}
 
 // LoadSwagger detects the version and loads an OpenAPI/Swagger specification
 // from a local file path or a remote URL.
@@ -66,10 +86,10 @@ func LoadSwagger(location string) (interface{}, string, error) {
 		}
 	}
 
-	// Detect version from data
-	var detector map[string]interface{}
-	if err := json.Unmarshal(data, &detector); err != nil {
-		return nil, "", fmt.Errorf("failed to parse JSON from '%s' for version detection: %w", location, err)
+	// Detect version from data (YAML or JSON — YAML is a superset).
+	detector, detErr := detectVersion(data)
+	if detErr != nil {
+		return nil, "", fmt.Errorf("failed to parse spec from '%s' for version detection: %w", location, detErr)
 	}
 
 	if _, ok := detector["openapi"]; ok {
@@ -93,7 +113,7 @@ func LoadSwagger(location string) (interface{}, string, error) {
 			return nil, "", fmt.Errorf("failed to load OpenAPI v3 spec from '%s': %w", location, loadErr)
 		}
 
-		if err := doc.Validate(context.Background()); err != nil {
+		if err := doc.Validate(openapi3.WithValidationOptions(context.Background(), openapi3.DisableExamplesValidation(), openapi3.DisableSchemaDefaultsValidation())); err != nil {
 			return nil, "", fmt.Errorf("OpenAPI v3 spec validation failed for '%s': %w", location, err)
 		}
 		return doc, VersionV3, nil
@@ -108,6 +128,137 @@ func LoadSwagger(location string) (interface{}, string, error) {
 	} else {
 		return nil, "", fmt.Errorf("failed to detect OpenAPI/Swagger version in '%s': missing 'openapi' or 'swagger' key", location)
 	}
+}
+
+// LoadSwaggerFromBytes detects the version and loads an OpenAPI/Swagger
+// specification from raw JSON bytes (e.g. an inline spec supplied at runtime).
+// origin is used only for error reporting. Self-contained specs are expected;
+// relative $refs are not resolved against a file/URL base.
+func LoadSwaggerFromBytes(data []byte, origin string) (interface{}, string, error) {
+	if origin == "" {
+		origin = "inline spec"
+	}
+	var detector map[string]interface{}
+	if detErr := detectVersionInto(data, &detector); detErr != nil {
+		return nil, "", fmt.Errorf("failed to parse spec from '%s' for version detection: %w", origin, detErr)
+	}
+
+	if _, ok := detector["openapi"]; ok {
+		// OpenAPI 3.x
+		loader := openapi3.NewLoader()
+		loader.IsExternalRefsAllowed = true
+		doc, err := loader.LoadFromData(data)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to load OpenAPI v3 spec from '%s': %w", origin, err)
+		}
+		if err := doc.Validate(openapi3.WithValidationOptions(context.Background(), openapi3.DisableExamplesValidation(), openapi3.DisableSchemaDefaultsValidation())); err != nil {
+			return nil, "", fmt.Errorf("OpenAPI v3 spec validation failed for '%s': %w", origin, err)
+		}
+		return doc, VersionV3, nil
+	} else if _, ok := detector["swagger"]; ok {
+		// Swagger 2.0
+		doc, err := loads.Analyzed(data, "2.0")
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to load or validate Swagger v2 spec from '%s': %w", origin, err)
+		}
+		return doc.Spec(), VersionV2, nil
+	}
+	return nil, "", fmt.Errorf("failed to detect OpenAPI/Swagger version in '%s': missing 'openapi' or 'swagger' key", origin)
+}
+
+// securitySchemesV3 extracts the security schemes declared by an OpenAPI v3
+// spec (components.securitySchemes) and marks which ones the root security
+// requirement references.
+func securitySchemesV3(doc *openapi3.T) []mcp.SecurityScheme {
+	if doc == nil {
+		return nil
+	}
+	required := map[string]bool{}
+	for _, req := range doc.Security {
+		for name := range req {
+			required[name] = true
+		}
+	}
+
+	if doc.Components == nil {
+		return nil
+	}
+	schemes := make([]mcp.SecurityScheme, 0, len(doc.Components.SecuritySchemes))
+	for key, ref := range doc.Components.SecuritySchemes {
+		if ref == nil || ref.Value == nil {
+			continue
+		}
+		ss := ref.Value
+		s := mcp.SecurityScheme{
+			Key:          key,
+			Type:         ss.Type,
+			In:           ss.In,
+			Name:         ss.Name,
+			Scheme:       ss.Scheme,
+			BearerFormat: ss.BearerFormat,
+			Required:     required[key],
+		}
+		if flows := ss.Flows; flows != nil {
+			switch {
+			case flows.Password != nil:
+				s.Flow = "password"
+				s.TokenURL = flows.Password.TokenURL
+				s.AuthURL = flows.Password.AuthorizationURL
+			case flows.ClientCredentials != nil:
+				s.Flow = "clientCredentials"
+				s.TokenURL = flows.ClientCredentials.TokenURL
+			case flows.AuthorizationCode != nil:
+				s.Flow = "authorizationCode"
+				s.TokenURL = flows.AuthorizationCode.TokenURL
+				s.AuthURL = flows.AuthorizationCode.AuthorizationURL
+			case flows.Implicit != nil:
+				s.Flow = "implicit"
+				s.AuthURL = flows.Implicit.AuthorizationURL
+			}
+		}
+		schemes = append(schemes, s)
+	}
+	return schemes
+}
+
+// securitySchemesV2 extracts the security schemes declared by a Swagger 2.0
+// spec (securityDefinitions).
+func securitySchemesV2(doc *spec.Swagger) []mcp.SecurityScheme {
+	if doc == nil {
+		return nil
+	}
+	required := map[string]bool{}
+	for _, req := range doc.Security {
+		for name := range req {
+			required[name] = true
+		}
+	}
+
+	schemes := make([]mcp.SecurityScheme, 0, len(doc.SecurityDefinitions))
+	for key, ss := range doc.SecurityDefinitions {
+		if ss == nil {
+			continue
+		}
+		s := mcp.SecurityScheme{
+			Key:      key,
+			Type:     ss.Type,
+			In:       ss.In,
+			Name:     ss.Name,
+			Required: required[key],
+		}
+		// Swagger 2.0 uses "basic" instead of http/bearer.
+		if ss.Type == "basic" {
+			s.Type = "http"
+			s.Scheme = "basic"
+		}
+		if ss.Type == "oauth2" {
+			s.Flow = ss.Flow
+			s.TokenURL = ss.TokenURL
+			s.AuthURL = ss.AuthorizationURL
+		}
+		schemes = append(schemes, s)
+	}
+	return schemes
 }
 
 // GenerateToolSet converts a loaded spec (v2 or v3) into an MCP ToolSet.
@@ -135,6 +286,7 @@ func GenerateToolSet(specDoc interface{}, version string, cfg *config.Config) (*
 func generateToolSetV3(doc *openapi3.T, cfg *config.Config) (*mcp.ToolSet, error) {
 	toolSet := createBaseToolSet(doc.Info.Title, doc.Info.Description, cfg)
 	toolSet.Operations = make(map[string]mcp.OperationDetail) // Initialize the map
+	toolSet.Security = securitySchemesV3(doc)
 
 	// Determine Base URL once
 	baseURL, err := determineBaseURLV3(doc, cfg)
@@ -438,6 +590,7 @@ func openapiSchemaToMCPSchemaV3(oapiSchemaRef *openapi3.SchemaRef) (mcp.Schema, 
 func generateToolSetV2(doc *spec.Swagger, cfg *config.Config) (*mcp.ToolSet, error) {
 	toolSet := createBaseToolSet(doc.Info.Title, doc.Info.Description, cfg)
 	toolSet.Operations = make(map[string]mcp.OperationDetail) // Initialize map
+	toolSet.Security = securitySchemesV2(doc)
 
 	// Determine Base URL once
 	baseURL, err := determineBaseURLV2(doc, cfg)

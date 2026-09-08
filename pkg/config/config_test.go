@@ -2,7 +2,11 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestConfig_GetAPIKey(t *testing.T) {
@@ -104,4 +108,74 @@ func TestConfig_GetAPIKey(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFileConfigRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	fc := &FileConfig{APIs: []APIDefinition{
+		{
+			Name:         "weather",
+			Source:       "https://spec.example.com/weather.json",
+			ActiveTarget: "prod",
+			IncludeTags:  []string{"public"},
+			Auth: AuthConfig{
+				Type: AuthAPIKey,
+				In:   "query",
+				Name: "key",
+			},
+			Targets: []TargetDefinition{
+				{Name: "prod", BaseURL: "https://prod.example.com", APIKeyEnv: "W_KEY"},
+				{Name: "staging", BaseURL: "https://staging.example.com"},
+			},
+		},
+	}}
+
+	require.NoError(t, SaveFile(path, fc))
+	// The persisted file must be YAML, not JSON.
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), `"apis":`)
+
+	loaded, err := LoadFile(path)
+	require.NoError(t, err)
+	require.Len(t, loaded.APIs, 1)
+	got := loaded.APIs[0]
+	assert.Equal(t, "weather", got.Name)
+	assert.Equal(t, "prod", got.ActiveTarget)
+	assert.Equal(t, "https://prod.example.com", got.Targets[0].BaseURL)
+	assert.Equal(t, "query", got.Auth.Effective().In)
+	assert.Equal(t, "query", got.Auth.In)
+
+	cfg := got.Targets[0].ToConfig()
+	assert.Equal(t, "https://prod.example.com", cfg.ServerBaseURL)
+	assert.Equal(t, "W_KEY", cfg.APIKeyFromEnvVar)
+}
+
+func TestFileConfigLoadsJSON(t *testing.T) {
+	// yaml.v3 also parses a plain JSON file, so legacy configs keep working.
+	path := filepath.Join(t.TempDir(), "config.json")
+	os.WriteFile(path, []byte(`{"apis":[{"name":"legacy","spec":"{}"}]}`), 0644)
+	fc, err := LoadFile(path)
+	require.NoError(t, err)
+	require.Len(t, fc.APIs, 1)
+	assert.Equal(t, "legacy", fc.APIs[0].Name)
+}
+
+func TestToConfigCustomHeaders(t *testing.T) {
+	target := TargetDefinition{
+		CustomHeaders: map[string]string{"X-Trace": "abc", "X-Tenant": "t1"},
+	}
+	cfg := target.ToConfig()
+	assert.Contains(t, cfg.CustomHeaders, "X-Trace:abc")
+	assert.Contains(t, cfg.CustomHeaders, "X-Tenant:t1")
+}
+
+func TestLoadFileMissingAndInvalid(t *testing.T) {
+	_, err := LoadFile(filepath.Join(t.TempDir(), "missing.json"))
+	assert.ErrorContains(t, err, "reading config file")
+
+	path := filepath.Join(t.TempDir(), "bad.json")
+	os.WriteFile(path, []byte("{not json"), 0644)
+	_, err = LoadFile(path)
+	assert.ErrorContains(t, err, "parsing config file")
 }

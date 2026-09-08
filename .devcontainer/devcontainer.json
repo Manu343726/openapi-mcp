@@ -1,0 +1,32 @@
+{
+  "name": "openapi-mcp",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": {
+      "VARIANT": "1",
+      "OPENCODE_VERSION": "latest"
+    }
+  },
+  "workspaceFolder": "/workspace",
+  "runArgs": [
+    "--init"
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go",
+        "streetsidesoftware.code-spell-checker"
+      ],
+      "settings": {
+        "go.useLanguageServer": true,
+        "files.eol": "\n"
+      }
+    }
+  },
+  "forwardPorts": [
+    8080,
+    8099
+  ],
+  "postCreateCommand": "bash ./.devcontainer/post-create.sh",
+  "remoteUser": "vscode"
+}

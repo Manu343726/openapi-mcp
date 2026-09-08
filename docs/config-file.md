@@ -1,0 +1,134 @@
+# Config file format
+
+When started with `--config <path>` (or via the Docker Compose deployment, which
+uses `--config /app/config/config.yaml`), the server seeds the registry from that
+file and **writes every runtime registration back to it**, so registrations made
+through the MCP management tools survive restarts.
+
+The file is YAML with a top-level `apis` list. JSON is also accepted when
+loading:
+
+```yaml
+apis:
+  - name: weather
+    source: https://raw.githubusercontent.com/.../swagger.json
+    include_tags: [current]
+    exclude_ops: [deleteForecast]
+    active_target: prod
+    auth:
+      type: apiKey
+      name: key
+      in: query
+    targets:
+      - name: prod
+        base_url: https://api.weatherbit.io/v2.0
+        api_key_env: WEATHERBIT_API_KEY
+      - name: staging
+        base_url: https://staging.weatherbit.io/v2.0
+```
+
+## API object
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Namespace prefixing the generated tools (`<name>__<operationId>`). Empty = no prefix. |
+| `source` | string | Path or http(s) URL of the OpenAPI v2/v3 spec. |
+| `spec` | string | Inline OpenAPI v2/v3 JSON document (alternative to `source`). |
+| `include_tags` | []string | Only expose operations with these tags. |
+| `exclude_tags` | []string | Exclude operations with these tags. |
+| `include_ops` | []string | Only expose these operation ids. |
+| `exclude_ops` | []string | Exclude these operation ids. |
+| `active_target` | string | Default target for this API (see below). |
+| `auth` | object | **API-level** authentication scheme: how the API expects clients to authenticate and where credentials/session tokens are placed (see below). Inferred from the spec's `securitySchemes` when omitted. |
+| `targets` | []target | The servers that implement this API. |
+
+Exactly one of `source` / `spec` is required.
+
+### `auth` object (authentication scheme — API config)
+
+The authentication **scheme type and credential placement** are API config, not
+target config. Targets only supply the credential *values*.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | `apiKey`, `http`, `oauth2`, `openIdConnect`, `custom`, or `none`. Inferred from the spec when omitted. |
+| `in` | string | Where the credential/token is attached: `header` (default), `query`, or `cookie`. |
+| `name` | string | Parameter name carrying the credential/token (e.g. `X-API-Key`, `Authorization`). |
+| `prefix` | string | Prefix prepended to the value (e.g. `Bearer `, `Basic `). |
+| `http_scheme` | string | HTTP scheme when `type: http`: `basic`, `bearer`, `digest`. |
+| `flow` | string | OAuth2 flow when `type: oauth2`: `password`, `clientCredentials`, `authorizationCode`, `implicit`. |
+| `token_url` | string | OAuth2 token endpoint when `type: oauth2` (and an exchange is used). |
+| `login_operation` | string | operationId (or full `<api>__<op>` name) of the API's login operation for login/token based auth. Inferred automatically when omitted. |
+
+When `auth` is omitted entirely, the server infers it from the spec's
+`securitySchemes`/`securityDefinitions`: an `apiKey` scheme yields `type:
+apiKey` with the declared name/location, `http`+`bearer` yields `type: http` +
+`Authorization: Bearer`, `http`+`basic` yields HTTP basic, and an `oauth2`
+scheme yields `type: oauth2` with its flow. Set `auth` explicitly to override
+inference.
+
+## Target object
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Target name, unique within the API (`""` → `"default"`). |
+| `base_url` | string | Base URL of this server. Empty falls back to the spec's own `servers`/`host`. |
+| `api_key` | string | Literal API key (avoid in checked-in files). |
+| `api_key_env` | string | Env var (in the server process) holding the key. |
+| `custom_headers` | map[string]string | Extra headers on every request to this target. |
+| `login_username` | string | Username for login-based auth (literal). |
+| `login_password` | string | Password for login-based auth (avoid in checked-in files). |
+| `login_username_env` | string | Env var (in the server process) holding the login username. |
+| `login_password_env` | string | Env var (in the server process) holding the login password. |
+
+API keys, login credentials and headers are resolved server-side at request time
+and are **never** exposed to MCP clients.
+
+## Active target
+
+- If an API has **one** target, it is automatically its active target.
+- Else the active target must be set explicitly (`active_target` in the file, or
+  `set_active_api_target` at runtime).
+- While an active target is set, tool calls route to it by default and the
+  synthetic `target` input argument is optional.
+- With no active target, callers **must** pass a `target` argument on every tool
+  call.
+
+## Login-based authentication
+
+Some APIs authenticate against a login endpoint (returning a session token)
+instead of accepting a static API key. To use these:
+
+1. Set login credentials on the **target** (`login_username`/`login_password`
+   and/or their `*_env` variants; env vars are preferred).
+2. The MCP server authenticates per the API's `auth` config:
+   - `type: oauth2` with a `token_url`: it performs the OAuth2 grant (password or
+     clientCredentials) against the token endpoint.
+   - otherwise: it finds the login operation in the spec to call — explicitly
+     via `auth.login_operation`, or automatically by scanning operations for
+     `login`/`signin`/`authenticate` (a POST is preferred).
+3. The returned token is parsed (it looks for `token`, `access_token`, `jwt`,
+   etc. in the JSON body, or `Authorization`/`X-Auth-Token` response headers)
+   and cached (default 1h TTL, honoring `expires_in`).
+4. The token is attached to each API request per the API-level `auth` config —
+   by default as `Authorization: Bearer <token>`; customize with `auth.name`,
+   `auth.in`, and `auth.prefix`.
+
+Example (API with a login endpoint and a target holding credentials):
+
+```yaml
+apis:
+  - name: corp
+    source: https://example.com/openapi.json
+    auth:
+      type: custom
+      login_operation: authToken
+    targets:
+      - name: prod
+        base_url: https://api.example.com
+        login_username_env: CORP_USER
+        login_password_env: CORP_PASS
+```
+
+The authentication call itself is only made once per (API, target) until the
+token expires, then it is refreshed automatically.
