@@ -101,6 +101,27 @@ var connMutex sync.RWMutex
 // handshake. tools/list_changed notifications are only meaningful to them.
 var initializedConnections = make(map[string]bool)
 
+// logLevelSeverity maps the RFC 5424 log levels used by the MCP logging
+// capability to numeric severities (lower is more severe). A logged message is
+// delivered to a client only when its severity is at least as severe as the
+// level that client requested via logging/setLevel.
+var logLevelSeverity = map[string]int{
+	"emergency": 0,
+	"alert":     1,
+	"critical":  2,
+	"error":     3,
+	"warning":   4,
+	"notice":    5,
+	"info":      6,
+	"debug":     7,
+}
+
+// connLogLevels records each connection's configured minimum log severity
+// (numeric value from logLevelSeverity), guarded by connMutex. Absent means the
+// client has not opted into logging via logging/setLevel, so the server sends
+// it no notifications/message.
+var connLogLevels = make(map[string]int)
+
 // Channel buffer size
 const messageChannelBufferSize = 10
 
@@ -211,6 +232,7 @@ func httpMethodGetHandler(w http.ResponseWriter, r *http.Request, regs ...*Regis
 		connMutex.Lock()
 		delete(activeConnections, connectionID)
 		delete(initializedConnections, connectionID)
+		delete(connLogLevels, connectionID)
 		connMutex.Unlock()
 		if len(regs) > 0 && regs[0] != nil {
 			regs[0].DropSession(connectionID)
@@ -594,9 +616,7 @@ func handleInitializeJSONRPC(connID string, req *jsonRPCRequest) jsonRPCResponse
 			"resources": map[string]interface{}{
 				"enabled": true,
 			},
-			"logging": map[string]interface{}{
-				"enabled": false,
-			},
+			"logging": map[string]interface{}{}, // declares the logging capability (notifications/message)
 			"roots": map[string]interface{}{
 				"listChanged": false,
 			},
@@ -635,12 +655,72 @@ func handleToolsListJSONRPC(connID string, req *jsonRPCRequest, reg *Registry) j
 }
 
 func handleLoggingSetLevelJSONRPC(connID string, req *jsonRPCRequest) jsonRPCResponse {
-	log.Printf("Handling 'logging/setLevel' (JSON-RPC) for %s", connID)
-
+	level, _ := paramsMap(req)["level"].(string)
+	severity, ok := logLevelSeverity[level]
+	if !ok {
+		return createJSONRPCError(req.ID, -32602, fmt.Sprintf("Invalid params: unknown log level %q", level), nil)
+	}
+	connMutex.Lock()
+	connLogLevels[connID] = severity
+	connMutex.Unlock()
+	log.Printf("Handling 'logging/setLevel' for %s: minimum level = %s", connID, level)
 	return jsonRPCResponse{
 		Jsonrpc: "2.0",
 		ID:      req.ID,
 		Result:  map[string]interface{}{},
+	}
+}
+
+// paramsMap returns a request's params as a map, tolerating both the
+// map[string]interface{} form (from a straight JSON decode) and a raw JSON
+// object. It returns nil when params are absent or not an object.
+func paramsMap(req *jsonRPCRequest) map[string]interface{} {
+	if m, ok := req.Params.(map[string]interface{}); ok {
+		return m
+	}
+	if raw, ok := req.Params.(json.RawMessage); ok {
+		var m map[string]interface{}
+		if err := json.Unmarshal(raw, &m); err == nil {
+			return m
+		}
+	}
+	return nil
+}
+
+// broadcastLogMessage pushes a notifications/message (the MCP logging channel)
+// to every initialized client whose logging/setLevel threshold accepts the given
+// severity. Clients that never configured a level receive nothing. Delivery is
+// best-effort.
+func broadcastLogMessage(level, logger string, data interface{}) {
+	severity, ok := logLevelSeverity[level]
+	if !ok {
+		return
+	}
+	notification := jsonRPCResponse{
+		Jsonrpc: "2.0",
+		Method:  "notifications/message",
+		Params: map[string]interface{}{
+			"level":  level,
+			"logger": logger,
+			"data":   data,
+		},
+	}
+	connMutex.RLock()
+	defer connMutex.RUnlock()
+	for connID, ch := range activeConnections {
+		if !initializedConnections[connID] {
+			continue // client has not completed 'initialize'
+		}
+		minSeverity, optedIn := connLogLevels[connID]
+		if !optedIn || severity > minSeverity {
+			continue // client filters out this severity
+		}
+		select {
+		case ch <- notification:
+			log.Printf("Sent notifications/message (%s) to %s", level, connID)
+		default:
+			log.Printf("Warning: dropped notifications/message (%s) for %s (channel full)", level, connID)
+		}
 	}
 }
 

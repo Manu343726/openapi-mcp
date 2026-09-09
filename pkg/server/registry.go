@@ -30,9 +30,9 @@ const (
 	// monitored APIs' spec sources for changes (file mtime / HTTP Last-Modified).
 	monitorPollInterval = 5 * time.Second
 
-	// notificationSpecChanged is the server->client notification sent when a
-	// monitored API's spec source changes.
-	notificationSpecChanged = "notifications/api/spec_changed"
+	// monitorLogger is the RFC5424 logger name attached to the
+	// notifications/message events emitted when a monitored spec changes.
+	monitorLogger = "openapi-mcp.monitoring"
 )
 
 var (
@@ -537,10 +537,11 @@ func (r *Registry) checkMonitoredAPIs(ctx context.Context) {
 
 // reactToSpecChange notifies clients that an API's spec source changed and, when
 // auto reload is enabled, re-loads the API. current is the source mtime that
-// changed.
+// changed. Clients are notified first (logging channel), then the reload happens
+// (which additionally broadcasts tools/list_changed).
 func (r *Registry) reactToSpecChange(apiName, source string, autoReload bool, current time.Time) {
 	log.Printf("Monitoring: API %q spec source %q changed (source mtime %s)", apiName, source, current.UTC().Format(time.RFC3339))
-	r.notifySpecChanged(apiName, source, autoReload)
+	r.logSpecChanged(apiName, source, current, autoReload)
 
 	// Record that this mtime was acted on so later polls do not re-fire.
 	r.mu.Lock()
@@ -556,12 +557,15 @@ func (r *Registry) reactToSpecChange(apiName, source string, autoReload bool, cu
 	}
 }
 
-// notifySpecChanged broadcasts a notifications/api/spec_changed message to all
-// initialized clients.
-func (r *Registry) notifySpecChanged(apiName, source string, autoReload bool) {
-	broadcastNotification(notificationSpecChanged, map[string]interface{}{
+// logSpecChanged surfaces a monitoring event to clients through the standard MCP
+// logging channel (a notifications/message at "notice" level). Clients that have
+// opted into logging via logging/setLevel receive it and may present it to the
+// user/agent.
+func (r *Registry) logSpecChanged(apiName, source string, changedAt time.Time, autoReload bool) {
+	broadcastLogMessage("notice", monitorLogger, map[string]interface{}{
 		"api":         apiName,
 		"source":      source,
+		"changed_at":  changedAt.UTC().Format(time.RFC3339),
 		"auto_reload": autoReload,
 	})
 }

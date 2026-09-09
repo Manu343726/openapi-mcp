@@ -54,9 +54,12 @@ An API can opt into watching its spec source via its `monitoring` config
 (`monitoring.enabled` / `monitoring.auto_reload`, see `config-file.md`). When
 enabled, a background watcher polls the source and, on change:
 
-- sends a `notifications/api/spec_changed` push to all initialized clients, with
-  `params: {api, source, auto_reload}` — the server's way of telling agents "the
-  loaded spec is stale";
+- sends a `notifications/message` log event (level `notice`, logger
+  `openapi-mcp.monitoring`, data `{api, source, changed_at, auto_reload}`) over
+  the standard MCP **logging** channel — the protocol's intended way for a server
+  to push event info to clients, which the client may surface to the user/agent;
+- the event is only delivered to clients that opted in via `logging/setLevel` and
+  whose configured minimum level includes `notice`;
 - if `auto_reload` is enabled, it then re-loads the spec (regenerating the
   tools), which also broadcasts the standard `notifications/tools/list_changed`
   so clients immediately re-fetch the updated tool list.
