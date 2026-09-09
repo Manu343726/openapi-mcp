@@ -1158,28 +1158,35 @@ func tryWriteHTTPError(w http.ResponseWriter, code int, message string) {
 	log.Printf("Sent plain HTTP error: %s (Code: %d)", message, code)
 }
 
-// broadcastToolsListChanged pushes a notifications/tools/list_changed message to
-// every connected SSE client so they re-issue tools/list after a registry
-// mutation. Delivery is best-effort: if a client's channel is full the
-// notification is dropped (the client can still re-fetch on its next request).
-func broadcastToolsListChanged() {
+// broadcastNotification sends a server->client JSON-RPC notification (method +
+// optional params) to every connected, initialized SSE client. Delivery is
+// best-effort: if a client's channel is full the notification is dropped.
+func broadcastNotification(method string, params interface{}) {
 	notification := jsonRPCResponse{
 		Jsonrpc: "2.0",
-		Method:  "notifications/tools/list_changed",
+		Method:  method,
+		Params:  params,
 	}
 	connMutex.RLock()
 	defer connMutex.RUnlock()
 	for connID, ch := range activeConnections {
 		if !initializedConnections[connID] {
-			continue // client has not completed 'initialize'; a list_changed is meaningless
+			continue // client has not completed 'initialize'; a push notification is meaningless
 		}
 		select {
 		case ch <- notification:
-			log.Printf("Sent notifications/tools/list_changed to %s", connID)
+			log.Printf("Sent %s to %s", method, connID)
 		default:
-			log.Printf("Warning: dropped notifications/tools/list_changed for %s (channel full)", connID)
+			log.Printf("Warning: dropped %s for %s (channel full)", method, connID)
 		}
 	}
+}
+
+// broadcastToolsListChanged pushes a notifications/tools/list_changed message to
+// every connected SSE client so they re-issue tools/list after a registry
+// mutation.
+func broadcastToolsListChanged() {
+	broadcastNotification("notifications/tools/list_changed", nil)
 }
 
 // markConnectionInitialized records that a session completed the initialize

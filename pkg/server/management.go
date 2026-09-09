@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/ckanthony/openapi-mcp/pkg/config"
 	"github.com/ckanthony/openapi-mcp/pkg/mcp"
@@ -31,6 +32,8 @@ const (
 	ToolRelogin      = "relogin"
 	ToolTestTarget   = "test_api_target"
 	ToolReloadConfig = "reload_config"
+	ToolReloadAPI    = "reload_api"
+	ToolCheckSpec    = "check_api_spec"
 	ToolPreviewCall  = "preview_api_call"
 
 	// Target management.
@@ -197,6 +200,16 @@ func buildManagementTools() []mcp.Tool {
 			InputSchema: emptySchema(),
 		},
 		{
+			Name:        ToolReloadAPI,
+			Description: "Reload an API from scratch: re-read its spec from the source (path/URL/inline) and regenerate its tools, preserving targets and the active target. Reports whether the previous load was outdated relative to the spec source (e.g. the spec file was modified after the API was registered).",
+			InputSchema: nameOnlySchema("api", "Name of the registered API to reload"),
+		},
+		{
+			Name:        ToolCheckSpec,
+			Description: "Check whether a registered API's loaded spec is stale: compares the spec-source timestamp recorded at load time against the current source mtime/Last-Modified, and reports up-to-date / outdated / unknown. Use reload_api to re-read a spec that changed.",
+			InputSchema: nameOnlySchema("api", "Name of the registered API"),
+		},
+		{
 			Name:        ToolPreviewCall,
 			Description: "Dry-run: build the literal HTTP request an MCP tool call would send (method, URL, headers, body, resolved target) WITHOUT executing it. Use to inspect exactly what will be sent before calling.",
 			InputSchema: mcp.Schema{
@@ -261,19 +274,21 @@ func registerAPISchema() mcp.Schema {
 			"spec":   {Type: "string", Description: "Inline OpenAPI/Swagger 2.0 or 3.x JSON document. Provide either source or spec."},
 			// Authentication is inferred from the spec's security schemes when
 			// possible and can be overridden with the auth_* fields below.
-			"auth_type":            {Type: "string", Enum: []interface{}{"apiKey", "http", "oauth2", "openIdConnect", "custom"}, Description: "Authentication scheme type. Inferred from the spec's security schemes when omitted."},
-			"auth_in":              {Type: "string", Enum: []interface{}{"header", "query", "cookie"}, Description: "Where the credential/token is attached (default header)"},
-			"auth_name":            stringProp("Name of the header/query/cookie parameter carrying the credential or token (default 'Authorization')"),
-			"auth_prefix":          stringProp("Prefix prepended to the credential/token value (e.g. 'Bearer ', 'Basic ')"),
-			"auth_http_scheme":     {Type: "string", Enum: []interface{}{"basic", "bearer", "digest"}, Description: "HTTP auth scheme when auth_type=http"},
-			"auth_flow":            {Type: "string", Enum: []interface{}{"password", "clientCredentials", "authorizationCode", "implicit"}, Description: "OAuth2 flow when auth_type=oauth2"},
-			"auth_token_url":       stringProp("OAuth2 token endpoint (when auth_type=oauth2 and a flow is used)"),
-			"auth_login_operation": stringProp("operationId (or full <api>__<op> name) of the API's login operation for login/token based auth. Inferred automatically when omitted."),
-			"include_tags":         stringListProp("Only expose operations with these tags"),
-			"exclude_tags":         stringListProp("Exclude operations with these tags"),
-			"include_ops":          stringListProp("Only expose these operation ids"),
-			"exclude_ops":          stringListProp("Exclude these operation ids"),
-			"update":               {Type: "boolean", Description: "Replace an existing registration with the same name (default false)"},
+			"auth_type":              {Type: "string", Enum: []interface{}{"apiKey", "http", "oauth2", "openIdConnect", "custom"}, Description: "Authentication scheme type. Inferred from the spec's security schemes when omitted."},
+			"auth_in":                {Type: "string", Enum: []interface{}{"header", "query", "cookie"}, Description: "Where the credential/token is attached (default header)"},
+			"auth_name":              stringProp("Name of the header/query/cookie parameter carrying the credential or token (default 'Authorization')"),
+			"auth_prefix":            stringProp("Prefix prepended to the credential/token value (e.g. 'Bearer ', 'Basic ')"),
+			"auth_http_scheme":       {Type: "string", Enum: []interface{}{"basic", "bearer", "digest"}, Description: "HTTP auth scheme when auth_type=http"},
+			"auth_flow":              {Type: "string", Enum: []interface{}{"password", "clientCredentials", "authorizationCode", "implicit"}, Description: "OAuth2 flow when auth_type=oauth2"},
+			"auth_token_url":         stringProp("OAuth2 token endpoint (when auth_type=oauth2 and a flow is used)"),
+			"auth_login_operation":   stringProp("operationId (or full <api>__<op> name) of the API's login operation for login/token based auth. Inferred automatically when omitted."),
+			"monitoring_enabled":     {Type: "boolean", Description: "Watch the API's spec source for changes and notify clients when it changes (default false)"},
+			"monitoring_auto_reload": {Type: "boolean", Description: "On spec change, also re-load the API and regenerate its tools (implies monitoring; default false)"},
+			"include_tags":           stringListProp("Only expose operations with these tags"),
+			"exclude_tags":           stringListProp("Exclude operations with these tags"),
+			"include_ops":            stringListProp("Only expose these operation ids"),
+			"exclude_ops":            stringListProp("Exclude these operation ids"),
+			"update":                 {Type: "boolean", Description: "Replace an existing registration with the same name (default false)"},
 		},
 		Required: []string{"name"},
 	}
@@ -388,6 +403,10 @@ func apiDefinitionFromArgs(args map[string]interface{}) (config.APIDefinition, b
 			Flow:           strArg(args, "auth_flow"),
 			TokenURL:       strArg(args, "auth_token_url"),
 			LoginOperation: strArg(args, "auth_login_operation"),
+		},
+		Monitoring: config.MonitorConfig{
+			Enabled:    boolArg(args, "monitoring_enabled"),
+			AutoReload: boolArg(args, "monitoring_auto_reload"),
 		},
 	}
 	if def.Source == "" && def.Spec == "" {
@@ -614,6 +633,50 @@ func (r *Registry) runManagementTool(connID, name string, args map[string]interf
 			b.WriteString("- " + m + "\n")
 		}
 		return okResult(strings.TrimSpace(b.String()))
+	case ToolCheckSpec:
+		api := strArg(args, "api")
+		loadedAt, current, status, err := r.CheckSpecState(api)
+		if err != nil {
+			return errResult(err)
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "API %q spec freshness: %s\n", api, strings.ToUpper(status))
+		if !loadedAt.IsZero() {
+			fmt.Fprintf(&b, "  loaded spec from source at: %s\n", loadedAt.UTC().Format(time.RFC3339))
+		} else {
+			b.WriteString("  loaded spec from source at: (unknown)\n")
+		}
+		if !current.IsZero() {
+			fmt.Fprintf(&b, "  current spec source mtime: %s\n", current.UTC().Format(time.RFC3339))
+		} else {
+			b.WriteString("  current spec source mtime: (unknown)\n")
+		}
+		switch status {
+		case SpecStatusOutdated:
+			b.WriteString("  WARNING: the spec was modified after the API was loaded; run reload_api to pick up the changes.")
+		case SpecStatusUpToDate:
+			b.WriteString("  The loaded spec matches the source.")
+		default:
+			b.WriteString("  Cannot compare: the spec source has no usable timestamp (inline spec or no Last-Modified header).")
+		}
+		return okResult(b.String())
+	case ToolReloadAPI:
+		api := strArg(args, "api")
+		result, err := r.ReloadAPI(api)
+		if err != nil {
+			return errResult(err)
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "Reloaded API %q from %q: %d tool(s).\n", result.Name, result.Source, result.ToolCount)
+		switch result.Status {
+		case SpecStatusOutdated:
+			fmt.Fprintf(&b, "The previous load was OUTDATED (spec source modified after load); the reloaded toolset picks up the changes.")
+		case SpecStatusUpToDate:
+			b.WriteString("The previous load was up-to-date; reloading had no spec changes to pick up.")
+		default:
+			b.WriteString("No spec-source timestamp is available (inline spec or unknown source mtime), so freshness could not be compared.")
+		}
+		return okResult(b.String())
 	case ToolPreviewCall:
 		body, err := previewAPICall(r, strArg(args, "operation"), args["arguments"])
 		if err != nil {
@@ -659,12 +722,15 @@ type apiInfoView struct {
 }
 
 type apiConfigView struct {
-	IncludeTags       []string `json:"include_tags,omitempty"`
-	ExcludeTags       []string `json:"exclude_tags,omitempty"`
-	IncludeOperations []string `json:"include_ops,omitempty"`
-	ExcludeOperations []string `json:"exclude_ops,omitempty"`
-	SpecVersion       string   `json:"spec_version,omitempty"`
-	ToolCount         int      `json:"tool_count"`
+	IncludeTags       []string              `json:"include_tags,omitempty"`
+	ExcludeTags       []string              `json:"exclude_tags,omitempty"`
+	IncludeOperations []string              `json:"include_ops,omitempty"`
+	ExcludeOperations []string              `json:"exclude_ops,omitempty"`
+	SpecVersion       string                `json:"spec_version,omitempty"`
+	RegisteredAt      string                `json:"registered_at,omitempty"`
+	SpecTimestamp     string                `json:"spec_timestamp,omitempty"` // spec source last-modified at load (RFC3339)
+	Monitoring        *config.MonitorConfig `json:"monitoring,omitempty"`     // optional spec-source monitoring
+	ToolCount         int                   `json:"tool_count"`
 }
 
 type targetInfoView struct {
@@ -701,6 +767,12 @@ func describeAPIDoc(entry *apiEntryView, opts describeOpts) (string, error) {
 		return opts.include[section]
 	}
 
+	var monitoring *config.MonitorConfig
+	if entry.Def.Monitoring.IsConfigured() {
+		m := entry.Def.Monitoring
+		monitoring = &m
+	}
+
 	view := apiDocView{
 		Auth:    entry.Def.Auth.Effective(),
 		Targets: []targetInfoView{},
@@ -711,6 +783,9 @@ func describeAPIDoc(entry *apiEntryView, opts describeOpts) (string, error) {
 			IncludeOperations: entry.Def.IncludeOps,
 			ExcludeOperations: entry.Def.ExcludeOps,
 			SpecVersion:       entry.SpecVersion,
+			RegisteredAt:      entry.RegisteredAt.Format(time.RFC3339),
+			SpecTimestamp:     formatSpecTimestamp(entry.SpecTimestamp),
+			Monitoring:        monitoring,
 			ToolCount:         len(entry.ToolSet.Tools),
 		},
 		Endpoints: []endpointView{},
@@ -974,15 +1049,20 @@ func searchOperations(entry *apiEntryView, query, method string) (string, error)
 
 func exportConfig(entry *apiEntryView) (string, error) {
 	view := map[string]interface{}{
-		"name":          entry.Def.Name,
-		"source":        entry.Def.Source,
-		"spec_version":  entry.SpecVersion,
-		"auth":          entry.Def.Auth.Effective(),
-		"active_target": entry.Def.ActiveTarget,
-		"include_tags":  entry.Def.IncludeTags,
-		"exclude_tags":  entry.Def.ExcludeTags,
-		"include_ops":   entry.Def.IncludeOps,
-		"exclude_ops":   entry.Def.ExcludeOps,
+		"name":           entry.Def.Name,
+		"source":         entry.Def.Source,
+		"spec_version":   entry.SpecVersion,
+		"registered_at":  entry.RegisteredAt.Format(time.RFC3339),
+		"spec_timestamp": formatSpecTimestamp(entry.SpecTimestamp),
+		"auth":           entry.Def.Auth.Effective(),
+		"active_target":  entry.Def.ActiveTarget,
+		"include_tags":   entry.Def.IncludeTags,
+		"exclude_tags":   entry.Def.ExcludeTags,
+		"include_ops":    entry.Def.IncludeOps,
+		"exclude_ops":    entry.Def.ExcludeOps,
+	}
+	if entry.Def.Monitoring.IsConfigured() {
+		view["monitoring"] = entry.Def.Monitoring
 	}
 	targets := []map[string]interface{}{}
 	for _, t := range entry.Def.Targets {
@@ -1041,6 +1121,15 @@ func testAPITarget(r *Registry, apiName, targetName string) (string, error) {
 }
 
 func okMessage(text string) string { return text }
+
+// formatSpecTimestamp renders a spec-source timestamp as RFC3339 UTC, or "" when
+// it is unknown (inline spec / unprobeable source).
+func formatSpecTimestamp(ts time.Time) string {
+	if ts.IsZero() {
+		return ""
+	}
+	return ts.UTC().Format(time.RFC3339)
+}
 
 // previewAPICall builds the literal request a tool call would send, without
 // executing it, and renders method/url/headers/body + resolved target.

@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -23,6 +25,14 @@ const (
 	// targetArgName is the synthetic input property injected into every tool of
 	// an API that has targets. It selects which target (server) handles the call.
 	targetArgName = "target"
+
+	// monitorPollInterval is how often the optional spec watcher re-checks the
+	// monitored APIs' spec sources for changes (file mtime / HTTP Last-Modified).
+	monitorPollInterval = 5 * time.Second
+
+	// notificationSpecChanged is the server->client notification sent when a
+	// monitored API's spec source changes.
+	notificationSpecChanged = "notifications/api/spec_changed"
 )
 
 var (
@@ -35,12 +45,23 @@ type apiEntry struct {
 	SpecTitle    string
 	SpecVersion  string
 	RegisteredAt time.Time
-	ToolSet      *mcp.ToolSet // tools keyed by bare operation names
-	Doc          *mcp.ApiDoc  // normalized spec documentation for introspection
+	// SpecTimestamp is the last-modified time of the spec *source* (file mtime
+	// or HTTP Last-Modified) at the moment it was loaded. Zero means the source
+	// has no usable timestamp (e.g. an inline spec). It lets callers detect that
+	// the loaded tools are stale relative to the source.
+	SpecTimestamp time.Time
+	ToolSet       *mcp.ToolSet // tools keyed by bare operation names
+	Doc           *mcp.ApiDoc  // normalized spec documentation for introspection
 
 	// tokenMu guards loginTokens (per-target login session cache).
 	tokenMu     sync.Mutex
 	loginTokens map[string]*tokenCacheEntry
+
+	// lastSpecNotified is the spec-source mtime for which a monitoring change
+	// (notification and/or auto-reload) was last acted on. It prevents the
+	// watcher from re-notifying on every poll while the source is unchanged.
+	// Not persisted.
+	lastSpecNotified time.Time
 }
 
 // toolRef locates the owning API for a fully qualified (prefixed) tool name.
@@ -52,15 +73,16 @@ type toolRef struct {
 // APISummary is a client-safe view of a registered API and its targets. It never
 // contains credentials.
 type APISummary struct {
-	Name         string   `json:"name"`
-	Source       string   `json:"source,omitempty"`
-	Title        string   `json:"title,omitempty"`
-	SpecVersion  string   `json:"spec_version,omitempty"`
-	ToolCount    int      `json:"tool_count"`
-	Tools        []string `json:"tools,omitempty"`
-	ActiveTarget string   `json:"active_target,omitempty"`
-	Targets      []string `json:"targets,omitempty"`
-	RegisteredAt string   `json:"registered_at,omitempty"`
+	Name          string   `json:"name"`
+	Source        string   `json:"source,omitempty"`
+	Title         string   `json:"title,omitempty"`
+	SpecVersion   string   `json:"spec_version,omitempty"`
+	SpecTimestamp string   `json:"spec_timestamp,omitempty"` // spec source last-modified at load (RFC3339)
+	ToolCount     int      `json:"tool_count"`
+	Tools         []string `json:"tools,omitempty"`
+	ActiveTarget  string   `json:"active_target,omitempty"`
+	Targets       []string `json:"targets,omitempty"`
+	RegisteredAt  string   `json:"registered_at,omitempty"`
 }
 
 // Registry owns the set of registered APIs and their targets. It is safe for
@@ -78,6 +100,11 @@ type Registry struct {
 	// A per-session active target overrides the global one for that session only,
 	// and is cleared when the session disconnects.
 	sessionTargets map[string]map[string]string
+
+	// Optional spec watcher (started on demand when an API opts into monitoring).
+	monitorCtx    context.Context
+	monitorCancel context.CancelFunc
+	monitorWG     sync.WaitGroup
 }
 
 // NewRegistry creates an empty registry. If persistPath is non-empty, runtime
@@ -148,6 +175,12 @@ func (r *Registry) normalizeDefinition(def *config.APIDefinition) error {
 	def.ActiveTarget = strings.TrimSpace(def.ActiveTarget)
 	def.Auth.LoginOperation = strings.TrimSpace(def.Auth.LoginOperation)
 	def.Auth.TokenURL = strings.TrimSpace(def.Auth.TokenURL)
+
+	// Automatic reload implies monitoring: there is nothing to auto-reload
+	// without watching the source.
+	if def.Monitoring.AutoReload && !def.Monitoring.Enabled {
+		def.Monitoring.Enabled = true
+	}
 
 	if def.Auth.IsConfigured() {
 		if _, err := config.ParseAPIKeyLocation(def.Auth.In); err != nil {
@@ -398,6 +431,141 @@ func (r *Registry) notifyToolsListChanged() {
 	broadcastToolsListChanged()
 }
 
+// --- Optional spec monitoring ---
+
+// ensureMonitorRunningLocked starts the spec watcher goroutine when at least one
+// registered API has monitoring enabled and the watcher is not already running.
+// Callers must hold r.mu.
+func (r *Registry) ensureMonitorRunningLocked() {
+	if r.monitorCtx != nil {
+		return
+	}
+	for _, entry := range r.apis {
+		if !entry.Def.Monitoring.IsConfigured() {
+			continue
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		r.monitorCtx = ctx
+		r.monitorCancel = cancel
+		r.monitorWG.Add(1)
+		go r.monitorLoop(ctx)
+		log.Printf("Monitoring: started spec watcher for %q (poll every %s)", entry.Def.Name, monitorPollInterval)
+		return
+	}
+}
+
+// monitorLoop polls the registered APIs' spec sources until ctx is cancelled.
+func (r *Registry) monitorLoop(ctx context.Context) {
+	defer r.monitorWG.Done()
+	ticker := time.NewTicker(monitorPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("Monitoring: spec watcher stopped")
+			return
+		case <-ticker.C:
+			r.checkMonitoredAPIs(ctx)
+		}
+	}
+}
+
+// StopMonitoring stops the spec watcher goroutine (if running) and waits for it
+// to exit. Safe to call multiple times; a no-op when monitoring was never
+// started.
+func (r *Registry) StopMonitoring() {
+	r.mu.Lock()
+	cancel := r.monitorCancel
+	r.monitorCtx = nil
+	r.monitorCancel = nil
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+		r.monitorWG.Wait()
+	}
+}
+
+// checkMonitoredAPIs scans every API with monitoring enabled and reacts when its
+// spec source moved past the timestamp it was loaded at (and past the last mtime
+// already acted upon): it notifies clients and, for auto_reload APIs, re-loads.
+//
+// Called by monitorLoop; also directly by tests.
+func (r *Registry) checkMonitoredAPIs(ctx context.Context) {
+	type monitored struct {
+		name       string
+		source     string
+		autoReload bool
+		loaded     time.Time
+		lastSeen   time.Time
+	}
+	var targets []monitored
+	r.mu.RLock()
+	for _, entry := range r.apis {
+		if !entry.Def.Monitoring.Enabled || entry.Def.Source == "" {
+			continue // monitoring disabled, or nothing to watch (inline spec)
+		}
+		targets = append(targets, monitored{
+			name:       entry.Def.Name,
+			source:     entry.Def.Source,
+			autoReload: entry.Def.Monitoring.AutoReload,
+			loaded:     entry.SpecTimestamp,
+			lastSeen:   entry.lastSpecNotified,
+		})
+	}
+	r.mu.RUnlock()
+
+	for _, t := range targets {
+		if ctx.Err() != nil {
+			return
+		}
+		current := parser.SpecSourceModified(t.source)
+		if current.IsZero() {
+			continue // source unreadable or carries no timestamp this tick
+		}
+		// React only when the source moved past both the load-time timestamp and
+		// the last mtime we already reacted to (prevents per-poll re-notifies).
+		guard := t.loaded
+		if t.lastSeen.After(guard) {
+			guard = t.lastSeen
+		}
+		if !current.After(guard) {
+			continue
+		}
+		r.reactToSpecChange(t.name, t.source, t.autoReload, current)
+	}
+}
+
+// reactToSpecChange notifies clients that an API's spec source changed and, when
+// auto reload is enabled, re-loads the API. current is the source mtime that
+// changed.
+func (r *Registry) reactToSpecChange(apiName, source string, autoReload bool, current time.Time) {
+	log.Printf("Monitoring: API %q spec source %q changed (source mtime %s)", apiName, source, current.UTC().Format(time.RFC3339))
+	r.notifySpecChanged(apiName, source, autoReload)
+
+	// Record that this mtime was acted on so later polls do not re-fire.
+	r.mu.Lock()
+	if entry := r.apis[apiName]; entry != nil {
+		entry.lastSpecNotified = current
+	}
+	r.mu.Unlock()
+
+	if autoReload {
+		if _, err := r.ReloadAPI(apiName); err != nil {
+			log.Printf("Monitoring: auto-reload of API %q failed: %v", apiName, err)
+		}
+	}
+}
+
+// notifySpecChanged broadcasts a notifications/api/spec_changed message to all
+// initialized clients.
+func (r *Registry) notifySpecChanged(apiName, source string, autoReload bool) {
+	broadcastNotification(notificationSpecChanged, map[string]interface{}{
+		"api":         apiName,
+		"source":      source,
+		"auto_reload": autoReload,
+	})
+}
+
 // --- Spec loading ---
 
 // loadToolSet parses an API definition into a ToolSet and reports the detected
@@ -433,6 +601,17 @@ func (r *Registry) loadToolSet(def config.APIDefinition) (*mcp.ToolSet, *mcp.Api
 	return toolSet, parser.BuildApiDoc(specDoc, version, toolSet), version, nil
 }
 
+// specTimestampFor returns the source last-modified time recorded for a spec
+// (file mtime / HTTP Last-Modified), or the zero time when the source has no
+// usable timestamp (inline spec, or probe failure). Zero is treated as
+// "unknown"/untracked everywhere downstream.
+func specTimestampFor(def config.APIDefinition) time.Time {
+	if def.Source == "" {
+		return time.Time{}
+	}
+	return parser.SpecSourceModified(def.Source)
+}
+
 func (r *Registry) newEntry(def config.APIDefinition) (*apiEntry, error) {
 	toolSet, doc, version, err := r.loadToolSet(def)
 	if err != nil {
@@ -448,13 +627,14 @@ func (r *Registry) newEntry(def config.APIDefinition) (*apiEntry, error) {
 		title = fmt.Sprintf("%s (%s)", toolSet.Name, def.Source)
 	}
 	return &apiEntry{
-		Def:          def,
-		SpecTitle:    title,
-		SpecVersion:  version,
-		RegisteredAt: time.Now().UTC(),
-		ToolSet:      toolSet,
-		Doc:          doc,
-		loginTokens:  make(map[string]*tokenCacheEntry),
+		Def:           def,
+		SpecTitle:     title,
+		SpecVersion:   version,
+		RegisteredAt:  time.Now().UTC(),
+		SpecTimestamp: specTimestampFor(def),
+		ToolSet:       toolSet,
+		Doc:           doc,
+		loginTokens:   make(map[string]*tokenCacheEntry),
 	}, nil
 }
 
@@ -463,16 +643,21 @@ func apiSummary(api *apiEntry) APISummary {
 	for _, t := range api.ToolSet.Tools {
 		toolNames = append(toolNames, toolFullName(api.Def.Name, t.Name))
 	}
+	specTimestamp := ""
+	if !api.SpecTimestamp.IsZero() {
+		specTimestamp = api.SpecTimestamp.UTC().Format(time.RFC3339)
+	}
 	return APISummary{
-		Name:         api.Def.Name,
-		Source:       api.Def.Source,
-		Title:        api.SpecTitle,
-		SpecVersion:  api.SpecVersion,
-		ToolCount:    len(toolNames),
-		Tools:        toolNames,
-		ActiveTarget: api.Def.ActiveTarget,
-		Targets:      apiTargetNames(api),
-		RegisteredAt: api.RegisteredAt.Format(time.RFC3339),
+		Name:          api.Def.Name,
+		Source:        api.Def.Source,
+		Title:         api.SpecTitle,
+		SpecVersion:   api.SpecVersion,
+		SpecTimestamp: specTimestamp,
+		ToolCount:     len(toolNames),
+		Tools:         toolNames,
+		ActiveTarget:  api.Def.ActiveTarget,
+		Targets:       apiTargetNames(api),
+		RegisteredAt:  api.RegisteredAt.Format(time.RFC3339),
 	}
 }
 
@@ -509,13 +694,14 @@ func (r *Registry) registerParsedAPI(def config.APIDefinition, toolSet *mcp.Tool
 		title = fmt.Sprintf("%s (%s)", toolSet.Name, def.Source)
 	}
 	entry := &apiEntry{
-		Def:          def,
-		SpecTitle:    title,
-		SpecVersion:  version,
-		RegisteredAt: time.Now().UTC(),
-		ToolSet:      toolSet,
-		Doc:          parser.BuildApiDoc(nil, version, toolSet),
-		loginTokens:  make(map[string]*tokenCacheEntry),
+		Def:           def,
+		SpecTitle:     title,
+		SpecVersion:   version,
+		RegisteredAt:  time.Now().UTC(),
+		SpecTimestamp: specTimestampFor(def),
+		ToolSet:       toolSet,
+		Doc:           parser.BuildApiDoc(nil, version, toolSet),
+		loginTokens:   make(map[string]*tokenCacheEntry),
 	}
 	return r.registerEntry(entry, replace)
 }
@@ -561,6 +747,7 @@ func (r *Registry) registerEntry(entry *apiEntry, replace bool) (*APISummary, er
 		return nil, err
 	}
 	r.apis, r.tools, r.index = apis, tools, index
+	r.ensureMonitorRunningLocked()
 	summary := apiSummary(entry)
 	r.notifyToolsListChanged()
 	return &summary, nil
@@ -622,10 +809,12 @@ func (r *Registry) GetAPI(name string) (APISummary, bool) {
 // introspection management tools. It deliberately omits the entry's mutex and
 // token cache so it can be handed out safely.
 type apiEntryView struct {
-	Def         config.APIDefinition
-	SpecVersion string
-	ToolSet     *mcp.ToolSet
-	Doc         *mcp.ApiDoc
+	Def           config.APIDefinition
+	SpecVersion   string
+	RegisteredAt  time.Time
+	SpecTimestamp time.Time
+	ToolSet       *mcp.ToolSet
+	Doc           *mcp.ApiDoc
 
 	// loginTokens mirror target->token expiry (for introspection; never secrets).
 	loginTokens map[string]time.Time
@@ -640,10 +829,12 @@ func (r *Registry) GetApiEntryView(name string) (*apiEntryView, error) {
 		return nil, fmt.Errorf("API %q is not registered", name)
 	}
 	view := &apiEntryView{
-		Def:         entry.Def,
-		SpecVersion: entry.SpecVersion,
-		ToolSet:     entry.ToolSet,
-		Doc:         entry.Doc,
+		Def:           entry.Def,
+		SpecVersion:   entry.SpecVersion,
+		RegisteredAt:  entry.RegisteredAt,
+		SpecTimestamp: entry.SpecTimestamp,
+		ToolSet:       entry.ToolSet,
+		Doc:           entry.Doc,
 	}
 	// Return a shallow copy of the token cache snapshot (nil-safe copied under lock).
 	view.loginTokens = make(map[string]time.Time, len(entry.loginTokens))
@@ -706,6 +897,88 @@ func (r *Registry) ReloadFromConfig(path string) ([]string, error) {
 		}
 	}
 	return messages, nil
+}
+
+// SpecStatus values returned by CheckSpecState and ReloadAPI. They describe how
+// the in-memory toolset relates to its spec source.
+const (
+	// SpecStatusUpToDate: the spec source has not changed since it was loaded.
+	SpecStatusUpToDate = "up-to-date"
+	// SpecStatusOutdated: the spec source was modified after the API was loaded.
+	SpecStatusOutdated = "outdated"
+	// SpecStatusUnknown: no timestamp can be determined (inline spec, or a
+	// source without a usable mtime/Last-Modified), so freshness is unknown.
+	SpecStatusUnknown = "unknown"
+)
+
+// CheckSpecState reports the freshness of an API's loaded spec: the timestamp
+// recorded when the spec was loaded, the current source last-modified time, and
+// a status ("up-to-date", "outdated" or "unknown"). Errors when the API is not
+// registered.
+func (r *Registry) CheckSpecState(apiName string) (loadedAt, current time.Time, status string, err error) {
+	apiName = strings.TrimSpace(apiName)
+	r.mu.RLock()
+	entry, ok := r.apis[apiName]
+	r.mu.RUnlock()
+	if !ok {
+		return time.Time{}, time.Time{}, "", fmt.Errorf("API %q is not registered", apiName)
+	}
+	loadedAt = entry.SpecTimestamp
+	current = parser.SpecSourceModified(entry.Def.Source)
+	return loadedAt, current, specStatus(loadedAt, current), nil
+}
+
+// specStatus derives a freshness status from a pair of timestamps.
+func specStatus(loadedAt, current time.Time) string {
+	if loadedAt.IsZero() || current.IsZero() {
+		return SpecStatusUnknown
+	}
+	if current.After(loadedAt) {
+		return SpecStatusOutdated
+	}
+	return SpecStatusUpToDate
+}
+
+// APIReloadResult describes the outcome of ReloadAPI.
+type APIReloadResult struct {
+	// Name of the reloaded API.
+	Name string
+	// Source the spec was reloaded from.
+	Source string
+	// ToolCount after reload.
+	ToolCount int
+	// Status of the *previous* load relative to the spec source at reload time:
+	// "up-to-date", "outdated" or "unknown".
+	Status string
+}
+
+// ReloadAPI reloads an API from scratch: the spec is re-read from its source
+// (file path, URL or inline) and the tools are regenerated, replacing the
+// previous entry. The API's targets and active target are preserved. It reports
+// whether the previous load was outdated relative to the spec source, so callers
+// know when the reload actually picked up spec changes.
+func (r *Registry) ReloadAPI(apiName string) (*APIReloadResult, error) {
+	apiName = strings.TrimSpace(apiName)
+	r.mu.RLock()
+	entry, ok := r.apis[apiName]
+	if !ok {
+		r.mu.RUnlock()
+		return nil, fmt.Errorf("API %q is not registered", apiName)
+	}
+	def := entry.Def
+	status := specStatus(entry.SpecTimestamp, parser.SpecSourceModified(def.Source))
+	r.mu.RUnlock()
+
+	summary, err := r.RegisterAPI(def, true)
+	if err != nil {
+		return nil, fmt.Errorf("API %q reload failed: %w", apiName, err)
+	}
+	return &APIReloadResult{
+		Name:      apiName,
+		Source:    def.Source,
+		ToolCount: summary.ToolCount,
+		Status:    status,
+	}, nil
 }
 
 // Tools returns the merged tool list served by tools/list (management tools
@@ -891,6 +1164,7 @@ func (r *Registry) commitStateLocked() error {
 		return err
 	}
 	r.tools, r.index = tools, index
+	r.ensureMonitorRunningLocked()
 	return nil
 }
 

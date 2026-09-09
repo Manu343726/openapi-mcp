@@ -29,6 +29,40 @@ So:
 | `describe_openapi_api` | Full API documentation: info (title/version/description), servers, tags, every endpoint (method, path, summary, description) mapped to its MCP tool, the DTO schemas, and the API's auth + target configuration. |
 | `get_api_operation` | Detailed docs for one endpoint by operationId (or full tool name `<api>__<op>`): method/path, parameters (location, required, type), request body schema, response schemas, and the exact MCP tool to call. |
 | `list_api_schemas` | List an API's DTO schemas by name (compact), expand a single schema's full property tree (`name=Order`), or expand all (`expand=true`). |
+| `check_api_spec` | Compare the timestamps the API's spec was loaded at against the current source (`Last-Modified` / file mtime): reports `up-to-date`, `outdated`, or `unknown`. |
+| `reload_api` | Re-read an API's spec from its source and regenerate its tools from scratch (targets + active target preserved). Reports whether the previous load was stale. |
+
+## Spec timestamp tracking
+
+When an API is registered the server records the *last-modified time of the spec
+source* (file modification time, or the `Last-Modified` header for HTTP sources):
+
+- it is exposed as `spec_timestamp` on `list_openapi_apis`,
+  `describe_openapi_api` and `export_config`;
+- `check_api_spec {api: x}` compares it against the source's *current* timestamp
+  and warns whether the in-memory toolset is stale (`outdated`) — i.e. the spec
+  was modified after the MCP server loaded it;
+- `reload_api {api: x}` re-reads the spec from its source and rebuilds the tools,
+  so changes to a spec file/URL are picked up without restarting the server.
+
+`spec_timestamp` is reported as `unknown` when no source timestamp is available
+(e.g. an inline spec, or an HTTP source that omits `Last-Modified`).
+
+## Spec monitoring
+
+An API can opt into watching its spec source via its `monitoring` config
+(`monitoring.enabled` / `monitoring.auto_reload`, see `config-file.md`). When
+enabled, a background watcher polls the source and, on change:
+
+- sends a `notifications/api/spec_changed` push to all initialized clients, with
+  `params: {api, source, auto_reload}` — the server's way of telling agents "the
+  loaded spec is stale";
+- if `auto_reload` is enabled, it then re-loads the spec (regenerating the
+  tools), which also broadcasts the standard `notifications/tools/list_changed`
+  so clients immediately re-fetch the updated tool list.
+
+Clients can always check freshness explicitly with `check_api_spec {api}` and
+force a refresh with `reload_api {api}` even when monitoring is off.
 
 ## How it maps
 

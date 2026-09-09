@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/ckanthony/openapi-mcp/pkg/config"
 	"github.com/ckanthony/openapi-mcp/pkg/mcp"
@@ -96,6 +97,13 @@ func LoadSwagger(location string) (interface{}, string, error) {
 		// OpenAPI 3.x
 		loader := openapi3.NewLoader()
 		loader.IsExternalRefsAllowed = true
+		// Bypass kin-openapi's package-global URI content cache
+		// (openapi3.URIMapCache). That cache is shared across all loaders in the
+		// process and would return the originally-read bytes for a path/URL even
+		// after the underlying file or resource changed. Re-loading a spec whose
+		// source was modified must pick up the fresh content, so read sources
+		// directly (files + HTTP) without caching.
+		loader.ReadFromURIFunc = openapi3.ReadFromURIs(openapi3.ReadFromFile, openapi3.ReadFromHTTP(&http.Client{}))
 		var doc *openapi3.T
 		var loadErr error
 
@@ -130,6 +138,47 @@ func LoadSwagger(location string) (interface{}, string, error) {
 	}
 }
 
+// SpecSourceModified returns the last-modified time of an OpenAPI spec *source*:
+// the file modification time for local paths, or the Last-Modified response header
+// for http(s) URLs (probed via a cheap HEAD request). It returns a zero time.Time
+// when the source carries no usable timestamp (e.g. a URL that omits Last-Modified)
+// or when the source cannot be probed, so callers know the freshness is unknown.
+//
+// It is used to track when a spec was last loaded so the MCP server can warn that
+// the in-memory toolset is stale relative to the source on disk/URL.
+func SpecSourceModified(location string) time.Time {
+	if location == "" {
+		return time.Time{}
+	}
+	locURL, err := url.ParseRequestURI(location)
+	isURL := err == nil && locURL != nil && (locURL.Scheme == "http" || locURL.Scheme == "https")
+	if !isURL {
+		absPath, err := filepath.Abs(location)
+		if err != nil {
+			return time.Time{}
+		}
+		st, err := os.Stat(absPath)
+		if err != nil {
+			return time.Time{}
+		}
+		return st.ModTime()
+	}
+	// HTTP(S) sources: perform a lightweight HEAD to read Last-Modified without
+	// downloading the whole spec.
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Head(location)
+	if err != nil {
+		return time.Time{}
+	}
+	defer resp.Body.Close()
+	if lm := resp.Header.Get("Last-Modified"); lm != "" {
+		if t, err := http.ParseTime(lm); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
 // LoadSwaggerFromBytes detects the version and loads an OpenAPI/Swagger
 // specification from raw JSON bytes (e.g. an inline spec supplied at runtime).
 // origin is used only for error reporting. Self-contained specs are expected;
@@ -147,6 +196,9 @@ func LoadSwaggerFromBytes(data []byte, origin string) (interface{}, string, erro
 		// OpenAPI 3.x
 		loader := openapi3.NewLoader()
 		loader.IsExternalRefsAllowed = true
+		// Bypass the package-global URI content cache so relative external refs
+		// are resolved fresh (see LoadSwagger for the rationale).
+		loader.ReadFromURIFunc = openapi3.ReadFromURIs(openapi3.ReadFromFile, openapi3.ReadFromHTTP(&http.Client{}))
 		doc, err := loader.LoadFromData(data)
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to load OpenAPI v3 spec from '%s': %w", origin, err)

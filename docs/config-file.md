@@ -40,9 +40,33 @@ apis:
 | `exclude_ops` | []string | Exclude these operation ids. |
 | `active_target` | string | Default target for this API (see below). |
 | `auth` | object | **API-level** authentication scheme: how the API expects clients to authenticate and where credentials/session tokens are placed (see below). Inferred from the spec's `securitySchemes` when omitted. |
+| `monitoring` | object | Optional spec-source monitoring (see below). |
 | `targets` | []target | The servers that implement this API. |
 
 Exactly one of `source` / `spec` is required.
+
+### `monitoring` object (spec-source monitoring — API config)
+
+Optional watching of the API's spec source (file mtime / HTTP `Last-Modified`).
+`auto_reload` implies `enabled`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `enabled` | bool | Poll the spec source and send a `notifications/api/spec_changed` to connected MCP clients when it changes. |
+| `auto_reload` | bool | On change, also re-load the spec and regenerate the API's tools (clients then get a `tools/list_changed` too). |
+
+```yaml
+apis:
+  - name: mofli
+    source: /path/to/mofli-v1.yaml
+    monitoring:
+      enabled: true
+      auto_reload: true
+```
+
+With monitoring-only, clients are notified that the loaded toolset is stale and
+can act on it (e.g. call `reload_api`); with `auto_reload` the server updates
+itself and clients re-fetch the tool list right away.
 
 ### `auth` object (authentication scheme — API config)
 

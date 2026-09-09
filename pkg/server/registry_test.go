@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -734,4 +735,121 @@ func TestSessionActiveTarget(t *testing.T) {
 	_, _, cfgAfter, err := reg.prepareCallArgsFor("sessA", api, map[string]interface{}{})
 	require.NoError(t, err)
 	assert.Equal(t, "https://prod", cfgAfter.ServerBaseURL)
+}
+
+// writeSpecFile writes a spec to a temp file and returns its path and mtime.
+func writeSpecFile(t *testing.T, name, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	return path
+}
+
+func TestSpecTimestampTrackedAndFresh(t *testing.T) {
+	path := writeSpecFile(t, "spec.json", registryTestV3Spec)
+	loaded := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	require.NoError(t, os.Chtimes(path, loaded, loaded))
+
+	reg := NewRegistry("")
+	_, err := reg.RegisterAPI(config.APIDefinition{Name: "weather", Source: path, Targets: []config.TargetDefinition{{Name: "prod", BaseURL: "https://api"}}}, false)
+	require.NoError(t, err)
+
+	// The summary carries the recorded source timestamp.
+	sum, ok := reg.GetAPI("weather")
+	require.True(t, ok)
+	assert.Equal(t, loaded.UTC().Format(time.RFC3339), sum.SpecTimestamp)
+
+	// Freshness: unchanged source -> up-to-date.
+	loadedAt, current, status, err := reg.CheckSpecState("weather")
+	require.NoError(t, err)
+	assert.Equal(t, loaded, loadedAt.UTC())
+	assert.False(t, current.IsZero())
+	assert.Equal(t, SpecStatusUpToDate, status)
+}
+
+func TestCheckSpecStateOutdatedAndReload(t *testing.T) {
+	path := writeSpecFile(t, "spec.json", registryTestV3Spec)
+	reg := NewRegistry("")
+	_, err := reg.RegisterAPI(config.APIDefinition{Name: "weather", Source: path, Targets: []config.TargetDefinition{{Name: "prod", BaseURL: "https://api"}}}, false)
+	require.NoError(t, err)
+
+	assert.Contains(t, toolNames(reg.Tools()), "weather__getCurrent")
+	assert.NotContains(t, toolNames(reg.Tools()), "weather__putCurrent")
+
+	// Simulate the spec being modified after the MCP loaded it: rewrite the
+	// file with an extra operation and push its mtime into the future.
+	modified := `{
+	  "openapi": "3.0.0",
+	  "info": {"title": "Weather API", "version": "1.1.0"},
+	  "servers": [{"url": "https://weather.example.com/v1"}],
+	  "paths": {
+	    "/current": {
+	      "get": {"operationId": "getCurrent", "responses": {"200": {"description": "OK"}}},
+	      "put": {"operationId": "putCurrent", "responses": {"200": {"description": "OK"}}}
+	    }
+	  }
+	}`
+	require.NoError(t, os.WriteFile(path, []byte(modified), 0o644))
+	future := time.Now().Add(24 * time.Hour).Truncate(time.Second)
+	require.NoError(t, os.Chtimes(path, future, future))
+
+	// The toolset is still the old one (no reload happened yet).
+	assert.NotContains(t, toolNames(reg.Tools()), "weather__putCurrent")
+
+	// Freshness check flags the in-memory toolset as outdated.
+	_, _, status, err := reg.CheckSpecState("weather")
+	require.NoError(t, err)
+	assert.Equal(t, SpecStatusOutdated, status)
+
+	// Reload picks the new operation up and preserves the target.
+	res, err := reg.ReloadAPI("weather")
+	require.NoError(t, err)
+	assert.Equal(t, SpecStatusOutdated, res.Status, "reload must report the previous (stale) load")
+	assert.Contains(t, toolNames(reg.Tools()), "weather__putCurrent")
+	sum, _ := reg.GetAPI("weather")
+	assert.ElementsMatch(t, []string{"prod"}, sum.Targets)
+	assert.Equal(t, "prod", sum.ActiveTarget)
+
+	// After reload the spec is fresh again.
+	_, _, status, err = reg.CheckSpecState("weather")
+	require.NoError(t, err)
+	assert.Equal(t, SpecStatusUpToDate, status)
+}
+
+func TestReloadAPIUnknownAndErrors(t *testing.T) {
+	// Inline specs carry no source timestamp -> unknown status.
+	reg := NewRegistry("")
+	_, err := reg.RegisterAPI(config.APIDefinition{Name: "inline", Spec: registryTestV3Spec}, false)
+	require.NoError(t, err)
+	res, err := reg.ReloadAPI("inline")
+	require.NoError(t, err)
+	assert.Equal(t, SpecStatusUnknown, res.Status)
+
+	// Unknown API errors.
+	_, err = reg.ReloadAPI("nope")
+	assert.ErrorContains(t, err, "not registered")
+	_, _, _, err = reg.CheckSpecState("nope")
+	assert.ErrorContains(t, err, "not registered")
+}
+
+func TestReloadAPIManagementTool(t *testing.T) {
+	path := writeSpecFile(t, "spec.json", registryTestV3Spec)
+	reg := NewRegistry("")
+	_, err := reg.RegisterAPI(config.APIDefinition{Name: "weather", Source: path}, false)
+	require.NoError(t, err)
+
+	// check_api_spec on an unchanged source reports up-to-date.
+	res := reg.runManagementTool("", ToolCheckSpec, map[string]interface{}{"api": "weather"})
+	require.True(t, res.ok, res.text)
+	assert.Contains(t, res.text, "UP-TO-DATE")
+
+	// reload_api succeeds.
+	res = reg.runManagementTool("", ToolReloadAPI, map[string]interface{}{"api": "weather"})
+	require.True(t, res.ok, res.text)
+	assert.Contains(t, res.text, "Reloaded API \"weather\"")
+
+	// Unknown API yields an error result.
+	res = reg.runManagementTool("", ToolReloadAPI, map[string]interface{}{"api": "nope"})
+	require.False(t, res.ok)
+	assert.Contains(t, res.text, "not registered")
 }

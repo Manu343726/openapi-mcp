@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/go-openapi/spec"
@@ -1121,4 +1122,46 @@ func TestGenerateToolSet(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSpecSourceModified(t *testing.T) {
+	t.Run("file mtime", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "spec.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(minimalV3SpecJSON), 0o644))
+
+		want := time.Date(2026, 5, 4, 3, 2, 1, 0, time.UTC)
+		require.NoError(t, os.Chtimes(path, want, want))
+
+		got := SpecSourceModified(path)
+		require.False(t, got.IsZero())
+		assert.Equal(t, want.UTC(), got.UTC())
+	})
+
+	t.Run("http Last-Modified", func(t *testing.T) {
+		stamp := time.Date(2026, 8, 9, 10, 11, 12, 0, time.UTC)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, http.MethodHead, r.Method)
+			w.Header().Set("Last-Modified", stamp.Format(http.TimeFormat))
+		}))
+		defer srv.Close()
+
+		got := SpecSourceModified(srv.URL)
+		require.False(t, got.IsZero())
+		assert.Equal(t, stamp.UTC(), got.UTC())
+	})
+
+	t.Run("http without Last-Modified is unknown", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		defer srv.Close()
+		assert.True(t, SpecSourceModified(srv.URL).IsZero())
+	})
+
+	t.Run("missing file is unknown", func(t *testing.T) {
+		assert.True(t, SpecSourceModified(filepath.Join(t.TempDir(), "nope.yaml")).IsZero())
+	})
+
+	t.Run("empty source is unknown", func(t *testing.T) {
+		assert.True(t, SpecSourceModified("").IsZero())
+	})
 }

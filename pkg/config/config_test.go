@@ -123,6 +123,10 @@ func TestFileConfigRoundTrip(t *testing.T) {
 				In:   "query",
 				Name: "key",
 			},
+			Monitoring: MonitorConfig{
+				Enabled:    true,
+				AutoReload: true,
+			},
 			Targets: []TargetDefinition{
 				{Name: "prod", BaseURL: "https://prod.example.com", APIKeyEnv: "W_KEY"},
 				{Name: "staging", BaseURL: "https://staging.example.com"},
@@ -152,6 +156,9 @@ func TestFileConfigRoundTrip(t *testing.T) {
 
 	assert.False(t, got.Targets[0].InsecureSkipVerify)
 	assert.False(t, cfg.InsecureSkipVerify)
+
+	assert.True(t, got.Monitoring.Enabled)
+	assert.True(t, got.Monitoring.AutoReload)
 }
 
 func TestFileConfigLoadsJSON(t *testing.T) {

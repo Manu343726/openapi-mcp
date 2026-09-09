@@ -211,6 +211,23 @@ func (a AuthConfig) IsConfigured() bool {
 	return a.Type != "" && a.Type != AuthNone
 }
 
+// MonitorConfig optionally watches an API's spec source for changes.
+type MonitorConfig struct {
+	// Enabled turns on monitoring: the server periodically checks the spec
+	// source (file mtime / HTTP Last-Modified) and notifies MCP clients with a
+	// notifications/api/spec_changed message when it changes.
+	Enabled bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	// AutoReload additionally re-loads the spec (and regenerates the tools)
+	// after notifying, so clients immediately see an updated toolset. It implies
+	// monitoring: setting it without Enabled enables monitoring too.
+	AutoReload bool `json:"auto_reload,omitempty" yaml:"auto_reload,omitempty"`
+}
+
+// IsConfigured reports whether any monitoring is requested.
+func (m MonitorConfig) IsConfigured() bool {
+	return m.Enabled || m.AutoReload
+}
+
 // APIDefinition describes an OpenAPI-backed API registered with the MCP server.
 // It is the canonical description shared between:
 //   - the startup config file (loaded via --config),
@@ -238,6 +255,10 @@ type APIDefinition struct {
 	// security schemes when possible, and can be set explicitly here. Targets
 	// supply only credential values (see TargetDefinition).
 	Auth AuthConfig `json:"auth,omitempty" yaml:"auth,omitempty"`
+
+	// Monitoring optionally watches this API's spec source for changes and, when
+	// configured, notifies clients / auto-reloads (see MonitorConfig).
+	Monitoring MonitorConfig `json:"monitoring,omitempty" yaml:"monitoring,omitempty"`
 
 	// IncludeTags/ExcludeTags/IncludeOps/ExcludeOps filter which spec operations
 	// are exposed (same semantics as the --include-* / --exclude-* CLI flags).
