@@ -425,7 +425,7 @@ func generateToolSetV3(doc *openapi3.T, cfg *config.Config) (*mcp.ToolSet, error
 					// Optionally, add a note if the requestBody itself was marked as required
 					if requestBody.Required { // Check the boolean field
 						// How to indicate this? Maybe add to description?
-						log.Info("request body is marked as required", "method", method, "path", rawPath)
+						log.Debug("request body is marked as required", "method", method, "path", rawPath)
 						// Or add all top-level body props to required? Needs decision.
 					}
 				}
