@@ -526,3 +526,51 @@ func TestNeedsLoginOperation(t *testing.T) {
 	assert.False(t, needsLoginOperation(config.AuthConfig{Type: config.AuthOAuth2, TokenURL: "https://x/token"}))
 	assert.True(t, needsLoginOperation(config.AuthConfig{Type: config.AuthOAuth2})) // no token URL
 }
+
+// TestInsecureSkipVerifyTLS verifies that a target served over a self-signed
+// TLS endpoint is reachable only when insecure_skip_verify is enabled on the
+// target, and that the flag propagates through the runtime config to the HTTP
+// client used for tool calls (including the login flow).
+func TestInsecureSkipVerifyTLS(t *testing.T) {
+	var meHeaders atomic.Value
+	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/login" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"access_token":"TLS-TOK","token_type":"Bearer"}`)
+			return
+		}
+		meHeaders.Store(r.Header.Get("Authorization"))
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	backend.StartTLS() // self-signed cert; does not validate without the flag
+	defer backend.Close()
+
+	// 1) Without insecure_skip_verify the call must fail (TLS handshake error).
+	reg := NewRegistry("")
+	reg.RegisterAPI(config.APIDefinition{
+		Name: "tlsapi",
+		Spec: loginSpec,
+		Auth: config.AuthConfig{Type: config.AuthCustomLogin},
+		Targets: []config.TargetDefinition{
+			{Name: "default", BaseURL: backend.URL, LoginUsername: "u", LoginPassword: "p"},
+		},
+	}, false)
+	_, err := executeRegisteredTool(reg, "", &ToolCallParams{ToolName: "tlsapi__getMe", Input: map[string]interface{}{}})
+	require.Error(t, err, "call against self-signed TLS must fail without insecure_skip_verify")
+
+	// 2) With insecure_skip_verify the call succeeds.
+	reg2 := NewRegistry("")
+	reg2.RegisterAPI(config.APIDefinition{
+		Name: "tlsapi",
+		Spec: loginSpec,
+		Auth: config.AuthConfig{Type: config.AuthCustomLogin},
+		Targets: []config.TargetDefinition{
+			{Name: "default", BaseURL: backend.URL, LoginUsername: "u", LoginPassword: "p", InsecureSkipVerify: true},
+		},
+	}, false)
+	httpResp, err := executeRegisteredTool(reg2, "", &ToolCallParams{ToolName: "tlsapi__getMe", Input: map[string]interface{}{}})
+	require.NoError(t, err)
+	defer httpResp.Body.Close()
+	assert.Equal(t, 200, httpResp.StatusCode)
+	assert.Equal(t, "Bearer TLS-TOK", meHeaders.Load().(string), "login token must be injected")
+}

@@ -36,6 +36,10 @@ type TargetDefinition struct {
 	// CustomHeaders are additional headers added to every request to this target.
 	CustomHeaders map[string]string `json:"custom_headers,omitempty" yaml:"custom_headers,omitempty"`
 
+	// InsecureSkipVerify disables TLS certificate verification for this target
+	// (e.g. for self-signed HTTPS like a local mofli device). Use with care.
+	InsecureSkipVerify bool `json:"insecure_skip_verify,omitempty" yaml:"insecure_skip_verify,omitempty"`
+
 	// Login-based authentication, for APIs that expose a login endpoint instead
 	// of a static API token. Before routing API calls, the MCP server logs in
 	// against the API's login operation or OAuth token endpoint (see
@@ -87,9 +91,10 @@ func (t *TargetDefinition) LoginCredentials() (username, password string) {
 // the API's Auth config, so they are not part of this Config.
 func (t *TargetDefinition) ToConfig() *Config {
 	cfg := &Config{
-		APIKey:           t.APIKey,
-		APIKeyFromEnvVar: t.APIKeyEnv,
-		ServerBaseURL:    strings.TrimSuffix(t.BaseURL, "/"),
+		APIKey:             t.APIKey,
+		APIKeyFromEnvVar:   t.APIKeyEnv,
+		ServerBaseURL:      strings.TrimSuffix(t.BaseURL, "/"),
+		InsecureSkipVerify: t.InsecureSkipVerify,
 	}
 	if len(t.CustomHeaders) > 0 {
 		keys := make([]string, 0, len(t.CustomHeaders))

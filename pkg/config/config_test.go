@@ -149,6 +149,9 @@ func TestFileConfigRoundTrip(t *testing.T) {
 	cfg := got.Targets[0].ToConfig()
 	assert.Equal(t, "https://prod.example.com", cfg.ServerBaseURL)
 	assert.Equal(t, "W_KEY", cfg.APIKeyFromEnvVar)
+
+	assert.False(t, got.Targets[0].InsecureSkipVerify)
+	assert.False(t, cfg.InsecureSkipVerify)
 }
 
 func TestFileConfigLoadsJSON(t *testing.T) {

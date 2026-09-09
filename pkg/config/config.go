@@ -32,10 +32,14 @@ type Config struct {
 	IncludeOperations []string // Only include operations with these IDs.
 	ExcludeOperations []string // Exclude operations with these IDs.
 
-	// Overrides (optional)
+	// Server URL detection
 	ServerBaseURL   string // Manually override the base URL for API calls, ignoring the spec's servers field.
 	DefaultToolName string // Name for the toolset if not specified in the spec's info section.
 	DefaultToolDesc string // Description for the toolset if not specified in the spec's info section.
+
+	// InsecureSkipVerify disables TLS certificate verification for outgoing
+	// requests (e.g. self-signed HTTPS targets like a local mofli device).
+	InsecureSkipVerify bool
 
 	// Server-side request modification
 	CustomHeaders string // Comma-separated list of headers (e.g., "Header1:Value1,Header2:Value2") to add to outgoing requests.

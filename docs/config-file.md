@@ -76,6 +76,7 @@ inference.
 | `api_key` | string | Literal API key (avoid in checked-in files). |
 | `api_key_env` | string | Env var (in the server process) holding the key. |
 | `custom_headers` | map[string]string | Extra headers on every request to this target. |
+| `insecure_skip_verify` | bool | Disable TLS certificate verification for this target (self-signed HTTPS, e.g. a local mofli device). Use with care. |
 | `login_username` | string | Username for login-based auth (literal). |
 | `login_password` | string | Password for login-based auth (avoid in checked-in files). |
 | `login_username_env` | string | Env var (in the server process) holding the login username. |

@@ -309,7 +309,8 @@ func (r *Registry) exchangeOAuthToken(api *apiEntry, target config.TargetDefinit
 		form.Set("password", password)
 	}
 
-	httpResp, err := http.PostForm(tokenURL, form)
+	client := httpClientForConfig(target.ToConfig())
+	httpResp, err := client.PostForm(tokenURL, form)
 	if err != nil {
 		return nil, fmt.Errorf("API %q target %q: OAuth2 token exchange at %s failed: %w", api.Def.Name, target.Name, tokenURL, err)
 	}

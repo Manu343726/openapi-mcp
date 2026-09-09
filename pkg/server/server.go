@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -901,7 +902,7 @@ func executeToolCall(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.C
 		return nil, err
 	}
 	log.Printf("[ExecuteToolCall] Sending request with headers: %v", req.Header)
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := httpClientForConfig(cfg)
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("[ExecuteToolCall] Error executing HTTP request: %v", err)
@@ -971,12 +972,11 @@ func handleToolCallJSONRPC(connID string, req *jsonRPCRequest, reg *Registry) js
 // authenticates via a login endpoint, a session token is obtained first and
 // attached to the request.
 func executeRegisteredTool(reg *Registry, connID string, params *ToolCallParams) (*http.Response, error) {
-	req, _, err := buildRegisteredRequestFor(reg, connID, params)
+	req, _, cfg, err := buildRegisteredRequestFor(reg, connID, params)
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	return client.Do(req)
+	return httpClientForConfig(cfg).Do(req)
 }
 
 // buildRegisteredRequest resolves a fully qualified tool name against the
@@ -984,17 +984,18 @@ func executeRegisteredTool(reg *Registry, connID string, params *ToolCallParams)
 // (without sending it) plus the resolved target name. Used both for execution
 // and for dry-run/preview.
 func buildRegisteredRequest(reg *Registry, params *ToolCallParams) (*http.Request, string, error) {
-	return buildRegisteredRequestFor(reg, "", params)
+	req, name, _, err := buildRegisteredRequestFor(reg, "", params)
+	return req, name, err
 }
 
-func buildRegisteredRequestFor(reg *Registry, connID string, params *ToolCallParams) (*http.Request, string, error) {
+func buildRegisteredRequestFor(reg *Registry, connID string, params *ToolCallParams) (*http.Request, string, *config.Config, error) {
 	api, tool, ok := reg.ResolveTool(params.ToolName)
 	if !ok {
-		return nil, "", fmt.Errorf("operation details for tool '%s' not found", params.ToolName)
+		return nil, "", nil, fmt.Errorf("operation details for tool '%s' not found", params.ToolName)
 	}
 	cleanArgs, target, targetCfg, err := reg.prepareCallArgsFor(connID, api, params.Input)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 
 	// Apply the API's authentication scheme using this target's credentials
@@ -1004,7 +1005,7 @@ func buildRegisteredRequestFor(reg *Registry, connID string, params *ToolCallPar
 	isLoginOp := tool.Name != "" && tool.Name == loginOperationFor(api)
 	if !isLoginOp {
 		if err := reg.applyAuthToConfig(api, target, targetCfg); err != nil {
-			return nil, "", err
+			return nil, "", nil, err
 		}
 	}
 
@@ -1015,9 +1016,22 @@ func buildRegisteredRequestFor(reg *Registry, connID string, params *ToolCallPar
 	local.Input = cleanArgs
 	req, err := buildToolRequest(&local, api.ToolSet, targetCfg)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
-	return req, target.Name, nil
+	return req, target.Name, targetCfg, nil
+}
+
+// httpClientForConfig returns an *http.Client configured for the target (TLS
+// verification disabled when the target sets insecure_skip_verify).
+func httpClientForConfig(cfg *config.Config) *http.Client {
+	c := &http.Client{Timeout: 30 * time.Second}
+	if cfg != nil && cfg.InsecureSkipVerify {
+		tr := &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402 -- explicit per-target opt-in for self-signed HTTPS
+		}
+		c.Transport = tr
+	}
+	return c
 }
 
 // toolResultFromHTTP converts an executed HTTP call into a ToolResultPayload.

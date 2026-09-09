@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/ckanthony/openapi-mcp/pkg/config"
 	"github.com/ckanthony/openapi-mcp/pkg/mcp"
@@ -295,6 +294,10 @@ func registerTargetSchema() mcp.Schema {
 			"login_password":     stringProp("Password used to authenticate via the API's login/OAuth flow (use login_password_env when possible)"),
 			"login_username_env": stringProp("Environment variable on the MCP server holding the login username"),
 			"login_password_env": stringProp("Environment variable on the MCP server holding the login password"),
+			"insecure_skip_verify": {
+				Type:        "boolean",
+				Description: "Disable TLS certificate verification for this target (e.g. self-signed HTTPS like a local mofli device). Use with care.",
+			},
 			"custom_headers": mcp.Schema{
 				Type:        "object",
 				Description: "Additional headers sent on every request to this target (map of header name to value)",
@@ -395,14 +398,15 @@ func apiDefinitionFromArgs(args map[string]interface{}) (config.APIDefinition, b
 
 func targetDefinitionFromArgs(args map[string]interface{}) (config.TargetDefinition, bool, error) {
 	t := config.TargetDefinition{
-		Name:             strArg(args, "name"),
-		BaseURL:          strArg(args, "base_url"),
-		APIKey:           strArg(args, "api_key"),
-		APIKeyEnv:        strArg(args, "api_key_env"),
-		LoginUsername:    strArg(args, "login_username"),
-		LoginPassword:    strArg(args, "login_password"),
-		LoginUsernameEnv: strArg(args, "login_username_env"),
-		LoginPasswordEnv: strArg(args, "login_password_env"),
+		Name:               strArg(args, "name"),
+		BaseURL:            strArg(args, "base_url"),
+		APIKey:             strArg(args, "api_key"),
+		APIKeyEnv:          strArg(args, "api_key_env"),
+		LoginUsername:      strArg(args, "login_username"),
+		LoginPassword:      strArg(args, "login_password"),
+		LoginUsernameEnv:   strArg(args, "login_username_env"),
+		LoginPasswordEnv:   strArg(args, "login_password_env"),
+		InsecureSkipVerify: boolArg(args, "insecure_skip_verify"),
 	}
 	headers, err := strMapArg(args, "custom_headers")
 	if err != nil {
@@ -980,9 +984,13 @@ func exportConfig(entry *apiEntryView) (string, error) {
 		"include_ops":   entry.Def.IncludeOps,
 		"exclude_ops":   entry.Def.ExcludeOps,
 	}
-	targets := []map[string]string{}
+	targets := []map[string]interface{}{}
 	for _, t := range entry.Def.Targets {
-		targets = append(targets, map[string]string{"name": t.Name, "base_url": t.BaseURL})
+		targets = append(targets, map[string]interface{}{
+			"name":                 t.Name,
+			"base_url":             t.BaseURL,
+			"insecure_skip_verify": t.InsecureSkipVerify,
+		})
 	}
 	view["targets"] = targets
 	body, err := json.MarshalIndent(view, "", "  ")
@@ -1015,7 +1023,7 @@ func testAPITarget(r *Registry, apiName, targetName string) (string, error) {
 		base = "http://" + base
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := httpClientForConfig(target.ToConfig())
 	for _, method := range []string{http.MethodOptions, http.MethodGet} {
 		req, err := http.NewRequest(method, strings.TrimRight(base, "/")+"/", nil)
 		if err != nil {
