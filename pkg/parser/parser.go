@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -14,12 +13,15 @@ import (
 	"time"
 
 	"github.com/ckanthony/openapi-mcp/pkg/config"
+	"github.com/ckanthony/openapi-mcp/pkg/logx"
 	"github.com/ckanthony/openapi-mcp/pkg/mcp"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/go-openapi/loads"
 	"github.com/go-openapi/spec"
 	"gopkg.in/yaml.v3"
 )
+
+var log = logx.Module("parser")
 
 const (
 	VersionV2 = "v2"
@@ -59,7 +61,7 @@ func LoadSwagger(location string) (interface{}, string, error) {
 	var absPath string // Store absolute path if it's a file
 
 	if !isURL {
-		log.Printf("Detected file path location: %s", location)
+		log.Debug("detected file path location", "location", location)
 		absPath, err = filepath.Abs(location)
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to get absolute path for '%s': %w", location, err)
@@ -70,7 +72,7 @@ func LoadSwagger(location string) (interface{}, string, error) {
 			return nil, "", fmt.Errorf("failed reading file path '%s': %w", absPath, err)
 		}
 	} else {
-		log.Printf("Detected URL location: %s", location)
+		log.Debug("detected URL location", "location", location)
 		// Read data first for version detection
 		resp, err := http.Get(location)
 		if err != nil {
@@ -109,11 +111,11 @@ func LoadSwagger(location string) (interface{}, string, error) {
 
 		if !isURL {
 			// Use LoadFromFile for local files
-			log.Printf("Loading V3 spec using LoadFromFile: %s", absPath)
+			log.Debug("loading V3 spec from file", "path", absPath)
 			doc, loadErr = loader.LoadFromFile(absPath)
 		} else {
 			// Use LoadFromURI for URLs
-			log.Printf("Loading V3 spec using LoadFromURI: %s", location)
+			log.Debug("loading V3 spec from URL", "url", location)
 			doc, loadErr = loader.LoadFromURI(locationURL)
 		}
 
@@ -127,7 +129,7 @@ func LoadSwagger(location string) (interface{}, string, error) {
 		return doc, VersionV3, nil
 	} else if _, ok := detector["swagger"]; ok {
 		// Swagger 2.0 - Still load from data as loads.Analyzed expects bytes
-		log.Printf("Loading V2 spec using loads.Analyzed from data (source: %s)", location)
+		log.Debug("loading V2 spec from data", "source", location)
 		doc, err := loads.Analyzed(data, "2.0")
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to load or validate Swagger v2 spec from '%s': %w", location, err)
@@ -343,7 +345,7 @@ func generateToolSetV3(doc *openapi3.T, cfg *config.Config) (*mcp.ToolSet, error
 	// Determine Base URL once
 	baseURL, err := determineBaseURLV3(doc, cfg)
 	if err != nil {
-		log.Printf("Warning: Could not determine base URL for V3 spec: %v. Operations might fail if base URL override is not set.", err)
+		log.Warn("could not determine base URL for V3 spec; operations might fail if no base URL override is set", "error", err)
 		baseURL = "" // Allow proceeding if override is set
 	}
 
@@ -379,7 +381,7 @@ func generateToolSetV3(doc *openapi3.T, cfg *config.Config) (*mcp.ToolSet, error
 			// Handle request body
 			requestBody, err := requestBodyToMCPV3(op.RequestBody)
 			if err != nil {
-				log.Printf("Warning: skipping request body for %s %s due to error: %v", method, rawPath, err)
+				log.Warn("skipping request body due to error", "method", method, "path", rawPath, "error", err)
 			} else {
 				// Merge request body schema into the main parameter schema
 				if requestBody.Content != nil {
@@ -393,7 +395,7 @@ func generateToolSetV3(doc *openapi3.T, cfg *config.Config) (*mcp.ToolSet, error
 							}
 						} else {
 							// If body is not an object, represent as 'requestBody'
-							log.Printf("Warning: V3 request body for %s %s is not an object schema. Representing as 'requestBody' field.", method, rawPath)
+							log.Warn("V3 request body is not an object schema; representing as 'requestBody' field", "method", method, "path", rawPath)
 							parametersSchema.Properties["requestBody"] = mediaTypeSchema
 						}
 						break // Only process the first content type
@@ -423,7 +425,7 @@ func generateToolSetV3(doc *openapi3.T, cfg *config.Config) (*mcp.ToolSet, error
 					// Optionally, add a note if the requestBody itself was marked as required
 					if requestBody.Required { // Check the boolean field
 						// How to indicate this? Maybe add to description?
-						log.Printf("Note: Request body for %s %s is marked as required.", method, rawPath)
+						log.Info("request body is marked as required", "method", method, "path", rawPath)
 						// Or add all top-level body props to required? Needs decision.
 					}
 				}
@@ -513,18 +515,18 @@ func parametersToMCPSchemaAndDetailsV3(params openapi3.Parameters, cfg *config.C
 	opParams := []mcp.ParameterDetail{}
 	for _, paramRef := range params {
 		if paramRef.Value == nil {
-			log.Printf("Warning: Skipping parameter with nil value.")
+			log.Warn("skipping parameter with nil value")
 			continue
 		}
 		param := paramRef.Value
 		if param.Schema == nil {
-			log.Printf("Warning: Skipping parameter '%s' with nil schema.", param.Name)
+			log.Warn("skipping parameter with nil schema", "param", param.Name)
 			continue
 		}
 
 		// Skip the API key parameter if configured
 		if cfg.APIKeyName != "" && param.Name == cfg.APIKeyName && param.In == string(cfg.APIKeyLocation) {
-			log.Printf("Parser V3: Skipping API key parameter '%s' ('%s') from input schema generation.", param.Name, param.In)
+			log.Debug("skipping API key parameter from input schema generation", "param", param.Name, "in", param.In)
 			continue
 		}
 
@@ -647,7 +649,7 @@ func generateToolSetV2(doc *spec.Swagger, cfg *config.Config) (*mcp.ToolSet, err
 	// Determine Base URL once
 	baseURL, err := determineBaseURLV2(doc, cfg)
 	if err != nil {
-		log.Printf("Warning: Could not determine base URL for V2 spec: %v. Operations might fail if base URL override is not set.", err)
+		log.Warn("could not determine base URL for V2 spec; operations might fail if no base URL override is set", "error", err)
 		baseURL = "" // Allow proceeding if override is set
 	}
 
@@ -660,7 +662,7 @@ func generateToolSetV2(doc *spec.Swagger, cfg *config.Config) (*mcp.ToolSet, err
 			if secDef.Type == "apiKey" {
 				apiKeyName = secDef.Name
 				apiKeyIn = secDef.In // "query" or "header"
-				log.Printf("Parser V2: Detected API key from security definition '%s': Name='%s', In='%s'", name, apiKeyName, apiKeyIn)
+				log.Debug("detected API key from security definition", "name", name, "key_name", apiKeyName, "in", apiKeyIn)
 				break // Assume only one apiKey definition for simplicity
 			}
 		}
@@ -724,7 +726,7 @@ func generateToolSetV2(doc *spec.Swagger, cfg *config.Config) (*mcp.ToolSet, err
 					}
 				} else {
 					// If body is not an object, represent as 'requestBody'
-					log.Printf("Warning: V2 request body for %s %s is not an object schema. Representing as 'requestBody' field.", method, rawPath)
+					log.Warn("V2 request body is not an object schema; representing as 'requestBody' field", "method", method, "path", rawPath)
 					if parametersSchema.Properties == nil {
 						parametersSchema.Properties = make(map[string]mcp.Schema)
 					}
@@ -834,7 +836,7 @@ func parametersToMCPSchemaAndDetailsV2(params []spec.Parameter, definitions spec
 	for _, param := range params {
 		// Skip the API key parameter if it's configured/detected
 		if apiKeyName != "" && param.Name == apiKeyName && (param.In == "query" || param.In == "header") {
-			log.Printf("Parser V2: Skipping API key parameter '%s' ('%s') from input schema generation.", param.Name, param.In)
+			log.Debug("skipping API key parameter from input schema generation", "param", param.Name, "in", param.In)
 			continue
 		}
 
@@ -848,7 +850,7 @@ func parametersToMCPSchemaAndDetailsV2(params []spec.Parameter, definitions spec
 		}
 
 		if param.In != "query" && param.In != "path" && param.In != "header" && param.In != "formData" {
-			log.Printf("Parser V2: Skipping unsupported parameter type '%s' for parameter '%s'", param.In, param.Name)
+			log.Warn("skipping unsupported parameter type", "type", param.In, "param", param.Name)
 			continue
 		}
 
@@ -907,7 +909,7 @@ func parametersToMCPSchemaAndDetailsV2(params []spec.Parameter, definitions spec
 
 		} else {
 			// Body param defined without a schema? Treat as simple string.
-			log.Printf("Warning: V2 body parameter '%s' defined without a schema. Treating as string.", bodyParam.Name)
+			log.Warn("V2 body parameter defined without a schema; treating as string", "param", bodyParam.Name)
 			bodySchema.Type = "string"
 			mcpSchema.Properties[bodyParam.Name] = bodySchema
 			if bodyParam.Required {

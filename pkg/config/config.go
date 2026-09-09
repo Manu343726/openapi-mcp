@@ -1,8 +1,9 @@
 package config
 
 import (
-	"log"
 	"os"
+
+	"github.com/ckanthony/openapi-mcp/pkg/logx"
 )
 
 // APIKeyLocation specifies where the API key is located for requests.
@@ -54,28 +55,29 @@ type Config struct {
 
 // GetAPIKey resolves the API key value, prioritizing the environment variable over the direct flag.
 func (c *Config) GetAPIKey() string {
-	log.Println("GetAPIKey: Attempting to resolve API key...")
+	log := logx.Module("config")
+	log.Debug("resolving API key")
 
 	// 1. Check environment variable specified by --api-key-env
 	if c.APIKeyFromEnvVar != "" {
-		log.Printf("GetAPIKey: Checking environment variable specified by --api-key-env: %s", c.APIKeyFromEnvVar)
+		log.Debug("checking api key environment variable", "env", c.APIKeyFromEnvVar)
 		val := os.Getenv(c.APIKeyFromEnvVar)
 		if val != "" {
-			log.Printf("GetAPIKey: Found key in environment variable %s.", c.APIKeyFromEnvVar)
+			log.Debug("found API key in environment variable", "env", c.APIKeyFromEnvVar)
 			return val
 		}
-		log.Printf("GetAPIKey: Environment variable %s not found or empty.", c.APIKeyFromEnvVar)
+		log.Debug("api key environment variable not found or empty", "env", c.APIKeyFromEnvVar)
 	} else {
-		log.Println("GetAPIKey: No --api-key-env variable specified.")
+		log.Debug("no --api-key-env variable specified")
 	}
 
 	// 2. Check direct flag --api-key
 	if c.APIKey != "" {
-		log.Println("GetAPIKey: Found key provided directly via --api-key flag.")
+		log.Debug("API key provided directly")
 		return c.APIKey
 	}
 
 	// 3. No key found
-	log.Println("GetAPIKey: No API key found from config (env var or direct flag).")
+	log.Debug("no API key found from config (env var or direct flag)")
 	return ""
 }

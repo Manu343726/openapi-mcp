@@ -476,6 +476,7 @@ The `openapi-mcp` command accepts the following flags:
 |----------------------|---------------------------------------------------------------------------------------------------------------------|----------|---------|
 | `--config`           | Path to a YAML config file listing APIs, targets and auth. Runtime registrations are written back to it.             | `string` | (none)  |
 | `--port`             | Port to run the MCP server on (overridden by `server.port` in `--config`).                                           | `int`    | `8080`  |
+| `--log-level`        | Minimum log level to emit: `debug`, `info`, `warn`, or `error`. Logs are structured lines on stdout.                 | `string` | `info`  |
 
 **Note:** You can get this list by running the tool with the `--help` flag (e.g., `docker run --rm openapi-mcp:latest --help`).
 

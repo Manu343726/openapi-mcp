@@ -7,20 +7,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
 
-	// "fmt" // No longer needed here
-	// "sync" // No longer needed here
-
 	"github.com/ckanthony/openapi-mcp/pkg/config"
+	"github.com/ckanthony/openapi-mcp/pkg/logx"
 	"github.com/ckanthony/openapi-mcp/pkg/mcp"
 	"github.com/google/uuid" // Import UUID package
 )
+
+var serverLog = logx.Module("server")
 
 // --- JSON-RPC Structures (Re-introduced for Handshake/Messages) ---
 
@@ -132,7 +131,7 @@ func ServeMCP(addr string, reg *Registry) error {
 	if reg == nil {
 		return fmt.Errorf("registry is required")
 	}
-	log.Printf("Preparing registry with %d API(s) for MCP...", len(reg.APIs()))
+	serverLog.Info("preparing registry for MCP", "apis", len(reg.APIs()))
 
 	// --- Handler Functions ---
 	mcpHandler := func(w http.ResponseWriter, r *http.Request) {
@@ -143,7 +142,7 @@ func ServeMCP(addr string, reg *Registry) error {
 		w.Header().Set("Access-Control-Expose-Headers", "X-Connection-ID")
 
 		if r.Method == http.MethodOptions {
-			log.Println("Responding to OPTIONS request")
+			serverLog.Debug("responding to OPTIONS request")
 			w.WriteHeader(http.StatusNoContent) // Use 204 No Content for OPTIONS
 			return
 		}
@@ -153,7 +152,7 @@ func ServeMCP(addr string, reg *Registry) error {
 		} else if r.Method == http.MethodPost {
 			httpMethodPostHandler(w, r, reg)
 		} else {
-			log.Printf("Method Not Allowed: %s", r.Method)
+			serverLog.Warn("method not allowed", "method", r.Method)
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		}
 	}
@@ -162,19 +161,19 @@ func ServeMCP(addr string, reg *Registry) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", mcpHandler) // Single endpoint for GET/POST/OPTIONS
 
-	log.Printf("MCP server listening on %s/mcp", addr)
+	serverLog.Info("MCP server listening", "addr", addr+"/mcp")
 	return http.ListenAndServe(addr, mux)
 }
 
 // httpMethodGetHandler handles the initial GET request to establish the SSE connection.
 func httpMethodGetHandler(w http.ResponseWriter, r *http.Request, regs ...*Registry) {
 	connectionID := uuid.New().String()
-	log.Printf("SSE client connecting: %s (Assigning ID: %s)", r.RemoteAddr, connectionID)
+	serverLog.Info("SSE client connecting", "remote", r.RemoteAddr, "conn_id", connectionID)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming unsupported!", http.StatusInternalServerError)
-		log.Println("Error: Client connection does not support flushing")
+		serverLog.Error("client connection does not support flushing", "remote", r.RemoteAddr)
 		return
 	}
 
@@ -190,20 +189,20 @@ func httpMethodGetHandler(w http.ResponseWriter, r *http.Request, regs ...*Regis
 
 	// --- Send initial :ok --- (Must happen *after* headers)
 	if _, err := fmt.Fprintf(w, ":ok\n\n"); err != nil {
-		log.Printf("Error sending SSE preamble to %s (ID: %s): %v", r.RemoteAddr, connectionID, err)
+		serverLog.Error("error sending SSE preamble", "remote", r.RemoteAddr, "conn_id", connectionID, "error", err)
 		return // Cannot proceed if preamble fails
 	}
 	flusher.Flush()
-	log.Printf("Sent :ok preamble to %s (ID: %s)", r.RemoteAddr, connectionID)
+	serverLog.Debug("sent :ok preamble", "remote", r.RemoteAddr, "conn_id", connectionID)
 
 	// --- Send initial SSE events --- (endpoint, mcp-ready)
 	endpointURL := fmt.Sprintf("/mcp?sessionId=%s", connectionID) // Assuming /mcp is the mount path
 	if err := writeSSEEvent(w, "endpoint", endpointURL); err != nil {
-		log.Printf("Error sending SSE endpoint event to %s (ID: %s): %v", r.RemoteAddr, connectionID, err)
+		serverLog.Error("error sending SSE endpoint event", "remote", r.RemoteAddr, "conn_id", connectionID, "error", err)
 		return
 	}
 	flusher.Flush()
-	log.Printf("Sent endpoint event to %s (ID: %s)", r.RemoteAddr, connectionID)
+	serverLog.Debug("sent endpoint event", "remote", r.RemoteAddr, "conn_id", connectionID)
 
 	readyMsg := jsonRPCRequest{ // Use request struct for notification format
 		Jsonrpc: "2.0",
@@ -215,18 +214,18 @@ func httpMethodGetHandler(w http.ResponseWriter, r *http.Request, regs ...*Regis
 		},
 	}
 	if err := writeSSEEvent(w, "message", readyMsg); err != nil {
-		log.Printf("Error sending SSE mcp-ready event to %s (ID: %s): %v", r.RemoteAddr, connectionID, err)
+		serverLog.Error("error sending SSE mcp-ready event", "remote", r.RemoteAddr, "conn_id", connectionID, "error", err)
 		return
 	}
 	flusher.Flush()
-	log.Printf("Sent mcp-ready event to %s (ID: %s)", r.RemoteAddr, connectionID)
+	serverLog.Debug("sent mcp-ready event", "remote", r.RemoteAddr, "conn_id", connectionID)
 
 	// --- Setup message channel and store connection ---
 	msgChan := make(chan jsonRPCResponse, messageChannelBufferSize) // Channel for responses
 	connMutex.Lock()
 	activeConnections[connectionID] = msgChan
 	connMutex.Unlock()
-	log.Printf("Registered channel for connection %s. Active connections: %d", connectionID, len(activeConnections))
+	serverLog.Debug("registered channel for connection", "conn_id", connectionID, "active", len(activeConnections))
 
 	cleanup := func() {
 		connMutex.Lock()
@@ -238,7 +237,7 @@ func httpMethodGetHandler(w http.ResponseWriter, r *http.Request, regs ...*Regis
 			regs[0].DropSession(connectionID)
 		}
 		close(msgChan) // Close channel when connection ends
-		log.Printf("Removed connection %s. Active connections: %d", connectionID, len(activeConnections))
+		serverLog.Info("client disconnected", "remote", r.RemoteAddr, "conn_id", connectionID, "active", len(activeConnections))
 	}
 	defer cleanup()
 
@@ -247,20 +246,20 @@ func httpMethodGetHandler(w http.ResponseWriter, r *http.Request, regs ...*Regis
 	defer cancel()
 
 	go func() {
-		log.Printf("[SSE Writer %s] Starting message writer goroutine", connectionID)
-		defer log.Printf("[SSE Writer %s] Exiting message writer goroutine", connectionID)
+		serverLog.Debug("sse writer starting", "conn_id", connectionID)
+		defer serverLog.Debug("sse writer exiting", "conn_id", connectionID)
 		for {
 			select {
 			case <-ctx.Done():
 				return // Exit if main context is cancelled
 			case resp, ok := <-msgChan:
 				if !ok {
-					log.Printf("[SSE Writer %s] Message channel closed.", connectionID)
+					serverLog.Debug("message channel closed", "conn_id", connectionID)
 					return // Exit if channel is closed
 				}
-				log.Printf("[SSE Writer %s] Sending message (ID: %v) via SSE", connectionID, resp.ID)
+				serverLog.Debug("sending message via SSE", "conn_id", connectionID, "id", resp.ID)
 				if err := writeSSEEvent(w, "message", resp); err != nil {
-					log.Printf("[SSE Writer %s] Error writing message to SSE stream: %v. Cancelling context.", connectionID, err)
+					serverLog.Error("error writing message to SSE stream; cancelling context", "conn_id", connectionID, "error", err)
 					cancel() // Signal main loop to exit on write error
 					return
 				}
@@ -273,11 +272,11 @@ func httpMethodGetHandler(w http.ResponseWriter, r *http.Request, regs ...*Regis
 	keepAliveTicker := time.NewTicker(20 * time.Second)
 	defer keepAliveTicker.Stop()
 
-	log.Printf("[SSE %s] Entering keep-alive loop", connectionID)
+	serverLog.Debug("entering keep-alive loop", "conn_id", connectionID)
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("[SSE %s] Context done. Exiting keep-alive loop.", connectionID)
+			serverLog.Debug("context done; exiting keep-alive loop", "conn_id", connectionID)
 			return // Exit loop if context cancelled (client disconnect or write error)
 		case <-keepAliveTicker.C:
 			// Send JSON-RPC ping notification instead of SSE comment
@@ -289,7 +288,7 @@ func httpMethodGetHandler(w http.ResponseWriter, r *http.Request, regs ...*Regis
 				},
 			}
 			if err := writeSSEEvent(w, "message", pingMsg); err != nil {
-				log.Printf("[SSE %s] Error sending ping notification: %v. Closing connection.", connectionID, err)
+				serverLog.Error("error sending ping notification; closing connection", "conn_id", connectionID, "error", err)
 				cancel() // Signal writer goroutine and exit
 				return
 			}
@@ -345,7 +344,7 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, reg *Registry
 	connID := r.Header.Get("X-Connection-ID") // Try header first
 	if connID == "" {
 		connID = r.URL.Query().Get("sessionId") // Fallback to query parameter
-		log.Printf("X-Connection-ID header missing, checking sessionId query param: found='%s'", connID)
+		serverLog.Debug("X-Connection-ID header missing, checking sessionId query param", "session_id", connID)
 	}
 
 	if connID == "" {
@@ -359,7 +358,7 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, reg *Registry
 	connMutex.RUnlock()
 
 	if !isActive {
-		log.Printf("Error: POST request received for inactive/unknown connection ID: %s", connID)
+		serverLog.Error("POST request received for inactive/unknown connection", "conn_id", connID)
 		// Still send sync error here, as we don't have a channel
 		tryWriteHTTPError(w, http.StatusNotFound, "Invalid or expired connection ID")
 		return
@@ -367,7 +366,7 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, reg *Registry
 
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Printf("Error reading POST request body for %s: %v", connID, err)
+		serverLog.Error("error reading POST request body", "conn_id", connID, "error", err)
 		// Create error response in the ToolResultPayload format
 		errPayload := ToolResultPayload{
 			IsError: true,
@@ -387,12 +386,12 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, reg *Registry
 		// Attempt to send via SSE channel
 		select {
 		case msgChan <- errResp:
-			log.Printf("Queued read error response (ID: %v) for %s onto SSE channel (as Result)", errResp.ID, connID)
+			serverLog.Debug("queued read error response onto SSE channel", "conn_id", connID, "id", errResp.ID)
 			// Send HTTP 202 Accepted back to the POST request
 			w.WriteHeader(http.StatusAccepted)
 			fmt.Fprintln(w, "Request accepted (with parse error), response will be sent via SSE.")
 		default:
-			log.Printf("Error: Failed to queue read error response (ID: %v) for %s - SSE channel likely full or closed.", errResp.ID, connID)
+			serverLog.Error("failed to queue read error response; SSE channel likely full or closed", "conn_id", connID, "id", errResp.ID)
 			// Send an error back on the POST request if channel fails
 			tryWriteHTTPError(w, http.StatusInternalServerError, "Failed to queue error response for SSE channel")
 		}
@@ -400,7 +399,7 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, reg *Registry
 	}
 	// No defer r.Body.Close() needed here as io.ReadAll reads to EOF
 
-	log.Printf("Received POST data for %s: %s", connID, string(bodyBytes))
+	serverLog.Debug("received POST data", "conn_id", connID, "body", string(bodyBytes))
 
 	// Attempt to unmarshal into a temporary map first to extract ID if possible
 	var rawReq map[string]interface{}
@@ -416,26 +415,26 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, reg *Registry
 		}
 	} else {
 		// Full unmarshal failed, log it but continue to try specific struct
-		log.Printf("Warning: Initial unmarshal into map failed for %s: %v. Will attempt specific struct unmarshal.", connID, err)
+		serverLog.Warn("initial unmarshal into map failed; will attempt specific struct unmarshal", "conn_id", connID, "error", err)
 		reqID = nil // ID is unknown
 	}
 
 	var req jsonRPCRequest // Expect JSON-RPC request
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
-		log.Printf("Error decoding JSON-RPC request for %s: %v", connID, err)
+		serverLog.Error("error decoding JSON-RPC request", "conn_id", connID, "error", err)
 		// Use createJSONRPCError to correctly format the error response
 		errResp := createJSONRPCError(reqID, -32700, "Parse error decoding JSON request", err.Error())
 
 		// Attempt to send via SSE channel
 		select {
 		case msgChan <- errResp:
-			log.Printf("Queued decode error response (ID: %v) for %s onto SSE channel", errResp.ID, connID)
+			serverLog.Debug("queued decode error response onto SSE channel", "conn_id", connID, "id", errResp.ID)
 			// Send HTTP 202 Accepted back to the POST request
 			w.WriteHeader(http.StatusAccepted)
 			// Use a specific message for decode errors
 			fmt.Fprintln(w, "Request accepted (with decode error), response will be sent via SSE.")
 		default:
-			log.Printf("Error: Failed to queue decode error response (ID: %v) for %s - SSE channel likely full or closed.", errResp.ID, connID)
+			serverLog.Error("failed to queue decode error response; SSE channel likely full or closed", "conn_id", connID, "id", errResp.ID)
 			// Send an error back on the POST request if channel fails
 			tryWriteHTTPError(w, http.StatusInternalServerError, "Failed to queue error response for SSE channel")
 		}
@@ -457,7 +456,7 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, reg *Registry
 	respToSend, isNotification = dispatchJSONRPC(connID, &req, reqID, reg)
 
 	if isNotification {
-		log.Printf("Notification %q received for %s. Ignoring.", req.Method, connID)
+		serverLog.Debug("notification received; ignoring", "method", req.Method, "conn_id", connID)
 		w.WriteHeader(http.StatusAccepted)
 		fmt.Fprintln(w, "Notification received.")
 		return
@@ -466,13 +465,13 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, reg *Registry
 	// --- Send response ASYNCHRONOUSLY via SSE channel (unless handled earlier) ---
 	select {
 	case msgChan <- respToSend:
-		log.Printf("Queued response (ID: %v) for %s onto SSE channel", respToSend.ID, connID)
+		serverLog.Debug("queued response onto SSE channel", "conn_id", connID, "id", respToSend.ID)
 		// Send HTTP 202 Accepted back to the POST request
 		w.WriteHeader(http.StatusAccepted)
 		// Use the standard message for successfully queued responses
 		fmt.Fprintln(w, "Request accepted, response will be sent via SSE.")
 	default:
-		log.Printf("Error: Failed to queue response (ID: %v) for %s - SSE channel likely full or closed.", respToSend.ID, connID)
+		serverLog.Error("failed to queue response; SSE channel likely full or closed", "conn_id", connID, "id", respToSend.ID)
 		http.Error(w, "Failed to queue response for SSE channel", http.StatusInternalServerError)
 	}
 }
@@ -482,23 +481,23 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, reg *Registry
 // requests that have no response (e.g. notifications/initialized).
 func dispatchJSONRPC(connID string, req *jsonRPCRequest, reqID interface{}, reg *Registry) (jsonRPCResponse, bool) {
 	if req.Jsonrpc != "2.0" {
-		log.Printf("Invalid JSON-RPC version ('%s') for %s, ID: %v", req.Jsonrpc, connID, reqID)
+		serverLog.Warn("invalid JSON-RPC version", "version", req.Jsonrpc, "conn_id", connID, "id", reqID)
 		return createJSONRPCError(reqID, -32600, "Invalid Request: jsonrpc field must be \"2.0\"", nil), false
 	}
 	if req.Method == "" {
-		log.Printf("Missing JSON-RPC method for %s, ID: %v", connID, reqID)
+		serverLog.Warn("missing JSON-RPC method", "conn_id", connID, "id", reqID)
 		return createJSONRPCError(reqID, -32600, "Invalid Request: method field is missing or empty", nil), false
 	}
 
-	log.Printf("Processing JSON-RPC message for %s: Method=%s, ID=%v", connID, req.Method, reqID)
+	serverLog.Debug("processing JSON-RPC message", "conn_id", connID, "method", req.Method, "id", reqID)
 	switch req.Method {
 	case "initialize":
 		incomingInitializeJSON, _ := json.Marshal(req)
-		log.Printf("DEBUG: Handling 'initialize' for %s. Incoming request: %s", connID, string(incomingInitializeJSON))
+		serverLog.Debug("handling initialize; incoming request", "conn_id", connID, "request", string(incomingInitializeJSON))
 		markConnectionInitialized(connID)
 		resp := handleInitializeJSONRPC(connID, req)
 		outgoingInitializeJSON, _ := json.Marshal(resp)
-		log.Printf("DEBUG: Prepared 'initialize' response for %s. Outgoing response: %s", connID, string(outgoingInitializeJSON))
+		serverLog.Debug("prepared initialize response", "conn_id", connID, "response", string(outgoingInitializeJSON))
 		return resp, false
 	case "notifications/initialized":
 		return jsonRPCResponse{}, true // no response to send
@@ -511,7 +510,7 @@ func dispatchJSONRPC(connID string, req *jsonRPCRequest, reqID interface{}, reg 
 	case "ping":
 		return jsonRPCResponse{Jsonrpc: "2.0", ID: req.ID, Result: map[string]interface{}{}}, false
 	default:
-		log.Printf("Received unknown JSON-RPC method '%s' for %s", req.Method, connID)
+		serverLog.Warn("unknown JSON-RPC method", "method", req.Method, "conn_id", connID)
 		return createJSONRPCError(reqID, -32601, fmt.Sprintf("Method not found: %s", req.Method), nil), false
 	}
 }
@@ -590,7 +589,7 @@ func dispatchRawItem(r *http.Request, item interface{}, reg *Registry) (jsonRPCR
 // --- JSON-RPC Message Handlers --- // Implementations returning jsonRPCResponse
 
 func handleInitializeJSONRPC(connID string, req *jsonRPCRequest) jsonRPCResponse {
-	log.Printf("Handling 'initialize' (JSON-RPC) for %s", connID)
+	serverLog.Info("handling initialize", "conn_id", connID)
 
 	// Honor the protocol version the client asked for if we support it.
 	protocolVersion := "2024-11-05"
@@ -636,7 +635,7 @@ func handleInitializeJSONRPC(connID string, req *jsonRPCRequest) jsonRPCResponse
 }
 
 func handleToolsListJSONRPC(connID string, req *jsonRPCRequest, reg *Registry) jsonRPCResponse {
-	log.Printf("Handling 'tools/list' (JSON-RPC) for %s", connID)
+	serverLog.Debug("handling tools/list", "conn_id", connID)
 
 	// Construct the result payload based on gin-mcp's structure
 	resultPayload := map[string]interface{}{
@@ -663,7 +662,7 @@ func handleLoggingSetLevelJSONRPC(connID string, req *jsonRPCRequest) jsonRPCRes
 	connMutex.Lock()
 	connLogLevels[connID] = severity
 	connMutex.Unlock()
-	log.Printf("Handling 'logging/setLevel' for %s: minimum level = %s", connID, level)
+	serverLog.Info("client set log level", "conn_id", connID, "level", level)
 	return jsonRPCResponse{
 		Jsonrpc: "2.0",
 		ID:      req.ID,
@@ -717,9 +716,9 @@ func broadcastLogMessage(level, logger string, data interface{}) {
 		}
 		select {
 		case ch <- notification:
-			log.Printf("Sent notifications/message (%s) to %s", level, connID)
+			serverLog.Debug("delivered log message to client", "conn_id", connID, "level", level)
 		default:
-			log.Printf("Warning: dropped notifications/message (%s) for %s (channel full)", level, connID)
+			serverLog.Warn("dropped log message (channel full)", "conn_id", connID, "level", level)
 		}
 	}
 }
@@ -730,13 +729,14 @@ func buildToolRequest(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.
 	toolName := params.ToolName
 	toolInput := params.Input // This is the map[string]interface{} from the client
 
-	log.Printf("[ExecuteToolCall] Looking up details for tool: %s", toolName)
+	tcLog := serverLog.With("tool", toolName)
+	tcLog.Debug("looking up operation details")
 	operation, ok := toolSet.Operations[toolName]
 	if !ok {
-		log.Printf("[ExecuteToolCall] Error: Operation details not found for tool '%s'", toolName)
+		tcLog.Error("operation details not found")
 		return nil, fmt.Errorf("operation details for tool '%s' not found", toolName)
 	}
-	log.Printf("[ExecuteToolCall] Found operation: Method=%s, Path=%s", operation.Method, operation.Path)
+	tcLog.Debug("found operation", "method", operation.Method, "path", operation.Path)
 
 	// --- Resolve API Key (using cfg passed from main) ---
 	resolvedKey := cfg.GetAPIKey()
@@ -744,16 +744,16 @@ func buildToolRequest(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.
 	apiKeyLocation := cfg.APIKeyLocation
 	hasServerKey := resolvedKey != "" && apiKeyName != "" && apiKeyLocation != ""
 
-	log.Printf("[ExecuteToolCall] API Key Details: Name='%s', In='%s', HasServerValue=%t", apiKeyName, apiKeyLocation, resolvedKey != "")
+	tcLog.Debug("api key details", "name", apiKeyName, "location", string(apiKeyLocation), "has_value", resolvedKey != "")
 
 	// --- Prepare Request Components ---
 	baseURL := operation.BaseURL // Use BaseURL from the specific operation
 	if cfg.ServerBaseURL != "" {
 		baseURL = cfg.ServerBaseURL // Override if global base URL is set
-		log.Printf("[ExecuteToolCall] Overriding base URL with global config: %s", baseURL)
+		tcLog.Debug("overriding base URL with global config", "base_url", baseURL)
 	}
 	if baseURL == "" {
-		log.Printf("[ExecuteToolCall] Warning: No base URL found for operation %s and no global override set.", toolName)
+		tcLog.Warn("no base URL found for operation and no global override set")
 		// For now, assume relative if empty.
 	}
 
@@ -772,13 +772,13 @@ func buildToolRequest(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.
 	}
 
 	// --- Process Input Parameters (Separating and Handling API Key Override) ---
-	log.Printf("[ExecuteToolCall] Processing %d input parameters...", len(toolInput))
+	tcLog.Debug("processing input parameters", "count", len(toolInput))
 	for key, value := range toolInput {
 		// --- API Key Override Check ---
 		// If this input param is the API key AND we have a valid server key config,
 		// skip processing the client's value entirely.
 		if hasServerKey && key == apiKeyName {
-			log.Printf("[ExecuteToolCall] Skipping client-provided param '%s' due to server API key override.", key)
+			tcLog.Debug("skipping client-provided param due to server API key override", "param", key)
 			continue
 		}
 		// --- End API Key Override ---
@@ -789,43 +789,43 @@ func buildToolRequest(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.
 		if strings.Contains(path, pathPlaceholder) {
 			// Handle path parameter substitution
 			pathParams[key] = fmt.Sprintf("%v", value)
-			log.Printf("[ExecuteToolCall] Found path parameter %s=%v", key, value)
+			tcLog.Debug("found path parameter", "param", key, "value", fmt.Sprintf("%v", value))
 		} else if knownParam {
 			// Handle parameters defined in the spec (query, header, cookie)
 			switch paramLocation {
 			case "query":
 				queryParams.Add(key, fmt.Sprintf("%v", value))
-				log.Printf("[ExecuteToolCall] Found query parameter %s=%v (from spec)", key, value)
+				tcLog.Debug("found query parameter", "param", key, "value", fmt.Sprintf("%v", value))
 			case "header":
 				headerParams.Add(key, fmt.Sprintf("%v", value))
-				log.Printf("[ExecuteToolCall] Found header parameter %s=%v (from spec)", key, value)
+				tcLog.Debug("found header parameter", "param", key, "value", fmt.Sprintf("%v", value))
 			case "cookie":
 				cookieParams = append(cookieParams, &http.Cookie{Name: key, Value: fmt.Sprintf("%v", value)})
-				log.Printf("[ExecuteToolCall] Found cookie parameter %s=%v (from spec)", key, value)
-			// case "formData": // TODO: Handle form data if needed
-			// 	bodyData[key] = value // Or handle differently based on content type
-			// 	log.Printf("[ExecuteToolCall] Found formData parameter %s=%v (from spec)", key, value)
+				tcLog.Debug("found cookie parameter", "param", key, "value", fmt.Sprintf("%v", value))
+				// case "formData": // TODO: Handle form data if needed
+				// 	bodyData[key] = value // Or handle differently based on content type
+				// 	tcLog.Debug("found formData parameter", "param", key, "value", fmt.Sprintf("%v", value))
 			default:
 				// Known parameter but location handling is missing or mismatched.
 				if paramLocation == "path" && (operation.Method == "GET" || operation.Method == "DELETE") {
 					// If spec says 'path' but it wasn't in the actual path, and it's a GET/DELETE,
 					// treat it as a query parameter as a fallback.
-					log.Printf("[ExecuteToolCall] Warning: Parameter '%s' is 'path' in spec but not in URL path '%s'. Adding to query parameters as fallback for GET/DELETE.", key, operation.Path)
+					tcLog.Warn("parameter is 'path' in spec but not in URL path; adding to query parameters as fallback for GET/DELETE", "param", key, "path", operation.Path)
 					queryParams.Add(key, fmt.Sprintf("%v", value))
 				} else {
 					// Otherwise, log the warning and ignore.
-					log.Printf("[ExecuteToolCall] Warning: Parameter '%s' has unsupported or unhandled location '%s' in spec. Ignoring.", key, paramLocation)
+					tcLog.Warn("parameter has unsupported or unhandled location in spec; ignoring", "param", key, "location", paramLocation)
 				}
 			}
 		} else if requestBodyRequired {
 			// If parameter is not in path or defined in spec params, and method expects a body,
 			// assume it belongs in the request body.
 			bodyData[key] = value
-			log.Printf("[ExecuteToolCall] Added body parameter %s=%v (assumed)", key, value)
+			tcLog.Debug("added body parameter (assumed)", "param", key, "value", fmt.Sprintf("%v", value))
 		} else {
 			// Parameter not in path, not in spec, and not a body method.
 			// This could be an extraneous parameter like 'explanation'. Log it.
-			log.Printf("[ExecuteToolCall] Ignoring parameter '%s' as it doesn't match path or known parameter location for method %s.", key, operation.Method)
+			tcLog.Debug("ignoring parameter as it doesn't match path or known parameter location", "param", key, "method", operation.Method)
 		}
 	}
 
@@ -836,43 +836,42 @@ func buildToolRequest(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.
 
 	// --- Inject Server API Key (if applicable) ---
 	if hasServerKey {
-		log.Printf("[ExecuteToolCall] Injecting server API key (Name: %s, Location: %s)", apiKeyName, string(apiKeyLocation))
+		tcLog.Debug("injecting server API key", "name", apiKeyName, "location", string(apiKeyLocation))
 		switch apiKeyLocation {
 		case config.APIKeyLocationQuery:
 			queryParams.Set(apiKeyName, resolvedKey) // Set overrides any previous value
-			log.Printf("[ExecuteToolCall] Injected API key '%s' into query parameters", apiKeyName)
+			tcLog.Debug("injected API key into query parameters", "name", apiKeyName)
 		case config.APIKeyLocationHeader:
 			headerParams.Set(apiKeyName, resolvedKey) // Set overrides any previous value
-			log.Printf("[ExecuteToolCall] Injected API key '%s' into headers", apiKeyName)
+			tcLog.Debug("injected API key into headers", "name", apiKeyName)
 		case config.APIKeyLocationPath:
 			pathPlaceholder := "{" + apiKeyName + "}"
 			if strings.Contains(path, pathPlaceholder) {
 				path = strings.Replace(path, pathPlaceholder, resolvedKey, -1)
-				log.Printf("[ExecuteToolCall] Injected API key into path parameter '%s'", apiKeyName)
+				tcLog.Debug("injected API key into path parameter", "name", apiKeyName)
 			} else {
-				log.Printf("[ExecuteToolCall] Warning: API key location is 'path' but placeholder '%s' not found in final path '%s' for injection.", pathPlaceholder, path)
+				tcLog.Warn("API key location is 'path' but placeholder not found in final path", "placeholder", pathPlaceholder, "path", path)
 			}
 		case config.APIKeyLocationCookie:
 			// Check if cookie already exists from input, replace if so
 			foundCookie := false
 			for i, c := range cookieParams {
 				if c.Name == apiKeyName {
-					log.Printf("[ExecuteToolCall] Replacing existing cookie '%s' with injected API key.", apiKeyName)
+					tcLog.Debug("replacing existing cookie with injected API key", "name", apiKeyName)
 					cookieParams[i] = &http.Cookie{Name: apiKeyName, Value: resolvedKey} // Replace existing
 					foundCookie = true
 					break
 				}
 			}
 			if !foundCookie {
-				log.Printf("[ExecuteToolCall] Adding new cookie '%s' with injected API key.", apiKeyName)
+				tcLog.Debug("adding new cookie with injected API key", "name", apiKeyName)
 				cookieParams = append(cookieParams, &http.Cookie{Name: apiKeyName, Value: resolvedKey}) // Append new
 			}
 		default:
-			// Use log.Printf for consistency
-			log.Printf("Warning: Unsupported API key location specified in config: '%s'", apiKeyLocation)
+			tcLog.Warn("unsupported API key location specified in config", "location", string(apiKeyLocation))
 		}
 	} else {
-		log.Printf("[ExecuteToolCall] Skipping server API key injection (config incomplete or key unresolved).")
+		tcLog.Debug("skipping server API key injection (config incomplete or key unresolved)")
 	}
 
 	// --- Inject Session Token (login-derived, if present) ---
@@ -881,7 +880,7 @@ func buildToolRequest(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.
 		switch cfg.SessionTokenLocation {
 		case config.APIKeyLocationQuery:
 			queryParams.Set(cfg.SessionTokenName, token)
-			log.Printf("[ExecuteToolCall] Injected session token '%s' into query parameters", cfg.SessionTokenName)
+			tcLog.Debug("injected session token into query parameters", "name", cfg.SessionTokenName)
 		case config.APIKeyLocationCookie:
 			foundCookie := false
 			for i, c := range cookieParams {
@@ -894,10 +893,10 @@ func buildToolRequest(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.
 			if !foundCookie {
 				cookieParams = append(cookieParams, &http.Cookie{Name: cfg.SessionTokenName, Value: token})
 			}
-			log.Printf("[ExecuteToolCall] Injected session token into cookie '%s'", cfg.SessionTokenName)
+			tcLog.Debug("injected session token into cookie", "name", cfg.SessionTokenName)
 		default: // header
 			headerParams.Set(cfg.SessionTokenName, token)
-			log.Printf("[ExecuteToolCall] Injected session token '%s' into headers", cfg.SessionTokenName)
+			tcLog.Debug("injected session token into headers", "name", cfg.SessionTokenName)
 		}
 	}
 
@@ -907,7 +906,7 @@ func buildToolRequest(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.
 	if len(queryParams) > 0 {
 		targetURL += "?" + queryParams.Encode()
 	}
-	log.Printf("[ExecuteToolCall] Final Target URL: %s %s", operation.Method, targetURL)
+	tcLog.Debug("final target URL", "method", operation.Method, "url", targetURL)
 
 	// --- Prepare Request Body ---
 	var reqBody io.Reader
@@ -916,17 +915,17 @@ func buildToolRequest(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.
 		var err error
 		bodyBytes, err = json.Marshal(bodyData)
 		if err != nil {
-			log.Printf("[ExecuteToolCall] Error marshalling request body: %v", err)
+			tcLog.Error("error marshalling request body", "error", err)
 			return nil, fmt.Errorf("error marshalling request body: %w", err)
 		}
 		reqBody = bytes.NewBuffer(bodyBytes)
-		log.Printf("[ExecuteToolCall] Request body: %s", string(bodyBytes))
+		tcLog.Debug("request body", "body", string(bodyBytes))
 	}
 
 	// --- Create HTTP Request ---
 	req, err := http.NewRequest(operation.Method, targetURL, reqBody)
 	if err != nil {
-		log.Printf("[ExecuteToolCall] Error creating HTTP request: %v", err)
+		tcLog.Error("error creating HTTP request", "error", err)
 		return nil, fmt.Errorf("error creating request: %w", err)
 	}
 
@@ -956,7 +955,7 @@ func buildToolRequest(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.
 				headerValue := strings.TrimSpace(parts[1])
 				if headerName != "" {
 					req.Header.Set(headerName, headerValue) // Set overrides potential input
-					log.Printf("[ExecuteToolCall] Added custom header from config: %s", headerName)
+					tcLog.Debug("added custom header from config", "header", headerName)
 				}
 			}
 		}
@@ -967,9 +966,9 @@ func buildToolRequest(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.
 		req.AddCookie(cookie)
 	}
 
-	log.Printf("[ExecuteToolCall] Prepared request with headers: %v", req.Header)
+	tcLog.Debug("prepared request", "headers", fmt.Sprintf("%v", req.Header))
 	if len(req.Cookies()) > 0 {
-		log.Printf("[ExecuteToolCall] Request cookies: %+v", req.Cookies())
+		tcLog.Debug("request cookies", "cookies", fmt.Sprintf("%v", req.Cookies()))
 	}
 
 	return req, nil
@@ -981,14 +980,15 @@ func executeToolCall(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.C
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("[ExecuteToolCall] Sending request with headers: %v", req.Header)
+	tcLog := serverLog.With("tool", params.ToolName)
+	tcLog.Debug("sending request", "headers", fmt.Sprintf("%v", req.Header))
 	client := httpClientForConfig(cfg)
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("[ExecuteToolCall] Error executing HTTP request: %v", err)
+		tcLog.Error("error executing HTTP request", "error", err)
 		return nil, fmt.Errorf("error executing request: %w", err)
 	}
-	log.Printf("[ExecuteToolCall] Request executed. Status Code: %d", resp.StatusCode)
+	tcLog.Debug("request executed", "status", resp.StatusCode)
 	// Note: Don't close resp.Body here, the caller (handleToolCallJSONRPC) needs it.
 	return resp, nil
 }
@@ -1003,26 +1003,26 @@ func handleToolCallJSONRPC(connID string, req *jsonRPCRequest, reg *Registry) js
 			var marshalErr error
 			rawParams, marshalErr = json.Marshal(paramsMap)
 			if marshalErr != nil {
-				log.Printf("Error marshalling params map for %s: %v", connID, marshalErr)
+				serverLog.Error("error marshalling params map", "conn_id", connID, "error", marshalErr)
 				return createJSONRPCError(req.ID, -32602, "Invalid parameters format (map marshal failed)", marshalErr.Error())
 			}
-			log.Printf("Handling 'tools/call' (JSON-RPC) for %s, Params: %s (from map)", connID, string(rawParams))
+			serverLog.Debug("handling tools/call (params from map)", "conn_id", connID, "params", string(rawParams))
 		} else {
-			log.Printf("Invalid parameters format for tools/call (not json.RawMessage or map[string]interface{}): %T", req.Params)
+			serverLog.Error("invalid parameters format for tools/call", "conn_id", connID, "type", fmt.Sprintf("%T", req.Params))
 			return createJSONRPCError(req.ID, -32602, "Invalid parameters format (expected JSON object)", nil)
 		}
 	} else {
-		log.Printf("Handling 'tools/call' (JSON-RPC) for %s, Params: %s (from RawMessage)", connID, string(rawParams))
+		serverLog.Debug("handling tools/call (params from raw message)", "conn_id", connID, "params", string(rawParams))
 	}
 
 	// Now, unmarshal the rawParams ([]byte) into ToolCallParams
 	var params ToolCallParams
 	if err := json.Unmarshal(rawParams, &params); err != nil {
-		log.Printf("Error unmarshalling tools/call params for %s: %v", connID, err)
+		serverLog.Error("error unmarshalling tools/call params", "conn_id", connID, "error", err)
 		return createJSONRPCError(req.ID, -32602, "Invalid parameters structure (unmarshal)", err.Error())
 	}
 
-	log.Printf("Executing tool '%s' for %s with input: %+v", params.ToolName, connID, params.Input)
+	serverLog.Info("executing tool", "tool", params.ToolName, "conn_id", connID)
 
 	// --- Execute the actual tool call ---
 	var resultPayload ToolResultPayload
@@ -1118,7 +1118,7 @@ func httpClientForConfig(cfg *config.Config) *http.Client {
 func toolResultFromHTTP(toolName string, reqID interface{}, httpResp *http.Response, execErr error) ToolResultPayload {
 	var resultPayload ToolResultPayload
 	if execErr != nil {
-		log.Printf("Error executing tool call '%s': %v", toolName, execErr)
+		serverLog.Error("error executing tool call", "tool", toolName, "error", execErr)
 		msg := fmt.Sprintf("Failed to execute tool '%s': %v", toolName, execErr)
 		resultPayload = ToolResultPayload{
 			Content:    []ToolResultContent{{Type: "text", Text: msg}},
@@ -1132,7 +1132,7 @@ func toolResultFromHTTP(toolName string, reqID interface{}, httpResp *http.Respo
 	defer httpResp.Body.Close() // Ensure body is closed
 	bodyBytes, readErr := io.ReadAll(httpResp.Body)
 	if readErr != nil {
-		log.Printf("Error reading response body for tool '%s': %v", toolName, readErr)
+		serverLog.Error("error reading response body", "tool", toolName, "error", readErr)
 		msg := fmt.Sprintf("Failed to read response from tool '%s': %v", toolName, readErr)
 		return ToolResultPayload{
 			Content:    []ToolResultContent{{Type: "text", Text: msg}},
@@ -1142,7 +1142,7 @@ func toolResultFromHTTP(toolName string, reqID interface{}, httpResp *http.Respo
 		}
 	}
 
-	log.Printf("Received response body for tool '%s': %s", toolName, string(bodyBytes))
+	serverLog.Debug("received response body", "tool", toolName, "status", httpResp.StatusCode, "body", string(bodyBytes))
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		// Error case: surface the API's error response body.
 		return ToolResultPayload{
@@ -1185,11 +1185,11 @@ func toolResultPayload(toolName string, reqID interface{}, ok bool, text string)
 func sendJSONRPCResponse(w http.ResponseWriter, resp jsonRPCResponse) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		log.Printf("Error encoding JSON-RPC response (ID: %v) for ConnID %v: %v", resp.ID, resp.Error, err)
+		serverLog.Error("error encoding JSON-RPC response", "id", resp.ID, "error", err)
 		// Attempt to send a plain text error if JSON encoding fails
 		tryWriteHTTPError(w, http.StatusInternalServerError, "Internal Server Error encoding JSON-RPC response")
 	}
-	log.Printf("Sent JSON-RPC response: Method=%s, ID=%v", getMethodFromResponse(resp), resp.ID)
+	serverLog.Debug("sent JSON-RPC response", "method", getMethodFromResponse(resp), "id", resp.ID)
 }
 
 // createJSONRPCError creates a JSON-RPC error response.
@@ -1205,7 +1205,7 @@ func createJSONRPCError(id interface{}, code int, message string, data interface
 // sendJSONRPCError sends a JSON-RPC error response.
 func sendJSONRPCError(w http.ResponseWriter, connID string, id interface{}, code int, message string, data interface{}) {
 	resp := createJSONRPCError(id, code, message, data)
-	log.Printf("Sending JSON-RPC Error for ConnID %s, ID %v: Code=%d, Message='%s'", connID, id, code, message)
+	serverLog.Debug("sending JSON-RPC error", "conn_id", connID, "id", id, "code", code, "message", message)
 	sendJSONRPCResponse(w, resp)
 }
 
@@ -1233,9 +1233,9 @@ func getMethodFromResponse(resp jsonRPCResponse) string {
 // tryWriteHTTPError attempts to write an HTTP error, ignoring failures.
 func tryWriteHTTPError(w http.ResponseWriter, code int, message string) {
 	if _, err := w.Write([]byte(message)); err != nil {
-		log.Printf("Error writing plain HTTP error response: %v", err)
+		serverLog.Error("error writing plain HTTP error response", "error", err)
 	}
-	log.Printf("Sent plain HTTP error: %s (Code: %d)", message, code)
+	serverLog.Debug("sent plain HTTP error", "message", message, "code", code)
 }
 
 // broadcastNotification sends a server->client JSON-RPC notification (method +
@@ -1255,9 +1255,9 @@ func broadcastNotification(method string, params interface{}) {
 		}
 		select {
 		case ch <- notification:
-			log.Printf("Sent %s to %s", method, connID)
+			serverLog.Debug("sent notification to client", "conn_id", connID, "method", method)
 		default:
-			log.Printf("Warning: dropped %s for %s (channel full)", method, connID)
+			serverLog.Warn("dropped notification (channel full)", "conn_id", connID, "method", method)
 		}
 	}
 }

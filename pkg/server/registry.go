@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -12,9 +11,12 @@ import (
 	"time"
 
 	"github.com/ckanthony/openapi-mcp/pkg/config"
+	"github.com/ckanthony/openapi-mcp/pkg/logx"
 	"github.com/ckanthony/openapi-mcp/pkg/mcp"
 	"github.com/ckanthony/openapi-mcp/pkg/parser"
 )
+
+var regLog = logx.Module("registry")
 
 const (
 	// toolNameSep separates an API name from an operation id in the flat MCP
@@ -449,7 +451,7 @@ func (r *Registry) ensureMonitorRunningLocked() {
 		r.monitorCancel = cancel
 		r.monitorWG.Add(1)
 		go r.monitorLoop(ctx)
-		log.Printf("Monitoring: started spec watcher for %q (poll every %s)", entry.Def.Name, monitorPollInterval)
+		regLog.Info("started spec watcher", "api", entry.Def.Name, "interval", monitorPollInterval.String())
 		return
 	}
 }
@@ -462,7 +464,7 @@ func (r *Registry) monitorLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("Monitoring: spec watcher stopped")
+			regLog.Debug("spec watcher stopped")
 			return
 		case <-ticker.C:
 			r.checkMonitoredAPIs(ctx)
@@ -540,7 +542,7 @@ func (r *Registry) checkMonitoredAPIs(ctx context.Context) {
 // changed. Clients are notified first (logging channel), then the reload happens
 // (which additionally broadcasts tools/list_changed).
 func (r *Registry) reactToSpecChange(apiName, source string, autoReload bool, current time.Time) {
-	log.Printf("Monitoring: API %q spec source %q changed (source mtime %s)", apiName, source, current.UTC().Format(time.RFC3339))
+	regLog.Info("spec source changed", "api", apiName, "source", source, "mtime", current.UTC().Format(time.RFC3339))
 	r.logSpecChanged(apiName, source, current, autoReload)
 
 	// Record that this mtime was acted on so later polls do not re-fire.
@@ -552,7 +554,7 @@ func (r *Registry) reactToSpecChange(apiName, source string, autoReload bool, cu
 
 	if autoReload {
 		if _, err := r.ReloadAPI(apiName); err != nil {
-			log.Printf("Monitoring: auto-reload of API %q failed: %v", apiName, err)
+			regLog.Warn("auto-reload of API failed", "api", apiName, "error", err)
 		}
 	}
 }
