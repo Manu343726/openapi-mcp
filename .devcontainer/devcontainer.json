@@ -10,6 +10,9 @@
   "runArgs": [
     "--init"
   ],
+  "containerEnv": {
+    "XDG_STATE_HOME": "/home/vscode/.local/state"
+  },
   "customizations": {
     "vscode": {
       "extensions": [
@@ -30,8 +33,8 @@
   "mounts": [
     "source=${localEnv:HOME}${localEnv:USERPROFILE}/.ssh,target=/home/vscode/.ssh-host,type=bind,readonly",
     "source=${localEnv:HOME}${localEnv:USERPROFILE}/.gitconfig,target=/home/vscode/.gitconfig-host,type=bind,readonly",
-    "source=${localWorkspaceFolder}/.opencode/state,target=/home/vscode/.local/share/opencode,type=bind"
+    "source=${localWorkspaceFolder}/.opencode/state,target=/home/vscode/.local/state,type=bind"
   ],
   "initializeCommand": "mkdir -p ${localWorkspaceFolder}/.opencode/state",
-  "postCreateCommand": "bash ./.devcontainer/ssh-forward.sh && sudo chown -R vscode:vscode /home/vscode/.local/share/opencode"
+  "postCreateCommand": "bash ./.devcontainer/ssh-forward.sh && sudo mkdir -p /home/vscode/.local/state && sudo chown -R vscode:vscode /home/vscode/.local"
 }
