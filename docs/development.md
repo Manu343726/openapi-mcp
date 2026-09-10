@@ -31,7 +31,7 @@ on.
   Go's default `%v` renders large integers in scientific notation (e.g.
   `1789037393` → `1.789037393e+09`), which REST APIs reject. Integral floats are
   emitted as plain integers; other floats use `'f'` (no exponent). Required for
-  epoch-style parameters like acme's `StartDateTime`/`EndDateTime`.
+  epoch-style parameters like `StartDateTime`/`EndDateTime`.
 - Array query/header/cookie parameters are sent as **repeated** values
   (`sites=1&sites=2`), never as a single `[a b]` literal
   (`paramValueStrings` / `appendParamValues` / `appendHeaderValues`).
@@ -52,9 +52,9 @@ on.
   No filters, functions or expressions.
 - **`knowledge_review`**: amends overlay docs in place; for library (persisted)
   docs it writes the amendment back to the manual (local backend) and re-indexes.
-- **Git backend** (`knowledge.backend.type: git`) is explicitly unimplemented and
-  returns a clear error. `knowledge_load`/`knowledge_init`/`update_api_knowledge`
-  all guard against it.
+- **Git backend** (`knowledge.backend.type: git`): implemented via `GitBackend`
+  (pull-rebase/ff_only, pending-push retention) and `knowledge_sync`. The checkout
+  lives under the configured `root`; sync state is surfaced by `knowledge_status`.
 
 ## MCP protocol (`pkg/server/server.go` `dispatchJSONRPC`)
 

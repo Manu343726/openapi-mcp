@@ -1,9 +1,12 @@
 # Plan — Semantic Knowledge Base (Markdown) for OpenAPI-MCP
 
-> Status: **in implementation**. Phase 1 (Markdown KB, per-connection overlay, knowledge
-> tools, capabilities/discover_task, hot config) and Phase 3 (run_task dry-run/ask/auto,
-> knowledge_review) are implemented and deployed. The git backend and persistent learning
-> are explicitly omitted for now; the storage backend stays `local`.
+> Status: **implemented**. Phase 1 (Markdown KB, per-connection overlay, knowledge
+> tools, capabilities/discover_task, hot config), Phase 2 (git sync backend: `type: git`,
+> `knowledge_sync`, pull/push with `rebase`/`ff_only` conflict policy, pending-push retention),
+> Phase 3 (run_task dry-run/ask/auto, knowledge_review) and Phase 4 (persistent learning:
+> `learning.enabled` opt-in, persistent `_suggestions/` drafts, `knowledge_suggestions` /
+> `knowledge_promote` with explicit confirmation) are implemented. The storage
+> backend defaults to `local`; set `type: git` for a git-backed knowledge base.
 >
 > Implemented code outline: `pkg/config` (`KnowledgeConfig`), `pkg/knowledge` (model, store,
 > links, search, templates, local backend), `pkg/server` (`knowledge.go`, `knowledge_tools.go`,
@@ -64,7 +67,7 @@ apis:
       author_name_env: KB_GIT_AUTHOR_NAME
       author_email_env: KB_GIT_AUTHOR_EMAIL
       learning:
-        enabled: false                # trace + _suggestions (phase 4)
+        enabled: false                # trace + persistent _suggestions drafts
 ```
 
 Design rules:
@@ -120,7 +123,7 @@ elements/endpoints/<operationId>.md
 elements/schemas/<schema>.md
 elements/fields/<entity>-<field>.md
 capabilities/<task>.md
-_suggestions/        # learning drafts (phase 4)
+_suggestions/        # learning drafts (persisted by knowledge_remember_sequence)
 _templates/<lang>/   # per-language templates for knowledge_init
 ```
 
@@ -165,10 +168,14 @@ related:
   (overlay wins).
 - Capture tools:
   - `knowledge_upsert {persist: false}` → overlay; `persist: true` → KB + git commit.
-  - `knowledge_remember_sequence {api, name?}` → capability draft in the overlay from the
-    `tools/call` observed in this session (steps + induced bindings).
-  - `knowledge_ask_clarification {api, intent}` → gaps: terms with no glossary entry, undocumented
-    endpoints, parameters with no meaning.
+  - `knowledge_remember_sequence {api, name?}` → capability draft from the
+    `tools/call` observed in this session (steps + induced bindings). With
+    `learning.enabled` the draft is also **persisted** under `_suggestions/`
+    (survives restarts and git sync); `knowledge_suggestions` lists drafts and
+    `knowledge_promote {confirm: true}` promotes one into `capabilities/`
+    (explicit confirmation only).
+  - `knowledge_clarify {api, intent}` → gaps: terms with no glossary entry,
+    undocumented endpoints, parameters with no meaning.
 
 ## 5. Discover and launch tasks
 
@@ -189,7 +196,7 @@ related:
 ## 6. Management tools
 
 `knowledge_init | load | reload | upsert | delete | define_task | import_file | get | search |
-clarify | remember_sequence | review | sync | status` +
+clarify | remember_sequence | suggestions | promote | review | sync | status` +
 `capabilities | discover_task | run_task | update_api_knowledge`.
 
 All follow the `buildManagementTools()` / `runManagementTool()` pattern.
@@ -211,11 +218,14 @@ All follow the `buildManagementTools()` / `runManagementTool()` pattern.
    get/search/clarification/remember_sequence/status/load/reload` + `capabilities`/`discover_task`
    (static plan) + `update_api_knowledge` (hot, local backend) + per-language templates + link/anchor
    validation.
-2. **Phase 2 — Git sync**: `gitBackend` (clone / pull-rebase / push+rebase, selective add,
-   coalescing, pending_push/conflict), `knowledge_sync`, real persistence.
-3. **Phase 3 — Execution**: `run_task` (dry-run→listing / ask→auto) + `knowledge_review`.
-4. **Phase 4 — Persistent learning**: `learning.enabled` opt-in → persistent traces +
-   `_suggestions/` + promotion with confirmation.
+2. **Phase 2 — Git sync** (implemented): `gitBackend` (clone / pull-rebase / push+rebase,
+   selective add, coalescing, pending_push/conflict), `knowledge_sync`, real persistence.
+3. **Phase 3 — Execution** (implemented): `run_task` (dry-run→listing / ask→auto) +
+   `knowledge_review`.
+4. **Phase 4 — Persistent learning** (implemented): `learning.enabled` opt-in → persistent
+   traces + `_suggestions/` + promotion with confirmation
+   (`knowledge_remember_sequence` persists drafts, `knowledge_suggestions` lists them,
+   `knowledge_promote` requires `confirm: true`).
 
 Each phase ships unit tests (`pkg/config`, `pkg/knowledge`, `pkg/server`, following the existing
 pattern) and an integration against `acme` for the Phase 1 MVP.

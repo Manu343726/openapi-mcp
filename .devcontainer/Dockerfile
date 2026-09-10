@@ -5,8 +5,8 @@
 # MCP server that this repo implements.
 #
 # opencode docs: https://opencode.ai
-# opencode installer: https://opencode.ai/install (installs a standalone binary,
-# so no Node.js/npm is required in the image).
+# opencode installer: https://opencode.ai/install (installs a standalone binary;
+# Node.js/npm are added below only for the mcp-debugger MCP server).
 
 # The Microsoft Go devcontainer images are published as
 # mcr.microsoft.com/devcontainers/go:<major> or :<major>-<minor>.
@@ -17,6 +17,23 @@ FROM mcr.microsoft.com/devcontainers/go:${VARIANT}
 RUN curl -fsSL https://opencode.ai/install | bash \
     && mv ~/.opencode/bin/opencode /usr/local/bin/opencode \
     && opencode --version
+
+# mcp-debugger (https://github.com/debugmcp/mcp-debugger) is a step-through
+# debugging MCP server for LLMs/opencode. It requires Node.js 22+, which the
+# base Go image does not ship (it only provides nvm), so install Node 22 via
+# nvm, expose node/npm/npx on PATH, and install the debugger globally under
+# /usr/local/bin so opencode can launch it as a local MCP server. The version
+# check fails the build if the install did not succeed.
+RUN set -eux; \
+    . /usr/local/share/nvm/nvm.sh; \
+    nvm install 22; \
+    nvm alias default 22 >/dev/null; \
+    ln -s "$(command -v node)" /usr/local/bin/node; \
+    ln -s "$(command -v npm)" /usr/local/bin/npm; \
+    ln -s "$(command -v npx)" /usr/local/bin/npx; \
+    node --version; \
+    npm install -g --prefix /usr/local @debugmcp/mcp-debugger; \
+    mcp-debugger --version
 
 # --- Container runtime conveniences for the code in this repo ---
 

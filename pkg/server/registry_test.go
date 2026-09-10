@@ -860,7 +860,8 @@ func TestKnowledgeToolsRegistered(t *testing.T) {
 	for _, want := range []string{
 		ToolKnowledgeInit, ToolKnowledgeLoad, ToolKnowledgeStatus, ToolKnowledgeUpsert,
 		ToolKnowledgeDelete, ToolKnowledgeGet, ToolKnowledgeSearch, ToolKnowledgeClarify,
-		ToolKnowledgeRemember, ToolCapabilities, ToolDiscoverTask, ToolUpdateKnowledge,
+		ToolKnowledgeRemember, ToolKnowledgeSuggestions, ToolKnowledgePromote,
+		ToolCapabilities, ToolDiscoverTask, ToolUpdateKnowledge,
 	} {
 		assert.Contains(t, names, want, "missing knowledge tool %q", want)
 	}
@@ -902,4 +903,110 @@ func TestKnowledgeOverlaySession(t *testing.T) {
 	reg.DropSession(connID)
 	_, err = reg.KnowledgeGet(connID, "acme", "nota")
 	assert.ErrorContains(t, err, "not found")
+}
+
+func registerLearningEntry(t *testing.T, reg *Registry, root string) {
+	t.Helper()
+	reg.mu.Lock()
+	reg.apis["acme"] = &apiEntry{Def: config.APIDefinition{
+		Name:   "acme",
+		Source: "/tmp/opencode/acme-spec.json",
+		Knowledge: config.KnowledgeConfig{
+			Enabled:  true,
+			Language: "es",
+			Root:     root,
+			Learning: config.KnowledgeLearningConfig{Enabled: true},
+		},
+	}}
+	reg.mu.Unlock()
+}
+
+func TestKnowledgeLearningPersistentSuggestions(t *testing.T) {
+	root := t.TempDir()
+	reg := NewRegistry("")
+	registerLearningEntry(t, reg, root)
+	conn := "learn-1"
+
+	// Record a couple of successful calls (as the tool-call hook does).
+	reg.RecordTrace(conn, "acme", "acme__list_users", map[string]interface{}{"site": "madrid"})
+	reg.RecordTrace(conn, "acme", "acme__create_user", map[string]interface{}{"user_name": "alejandro", "site_id": "2"})
+
+	out, err := reg.RememberSequence(conn, "acme", "crear-usuario")
+	require.NoError(t, err)
+	assert.Contains(t, out, "_suggestions/crear-usuario.md")
+
+	// The draft is persisted on disk and flagged Draft in the loaded library.
+	suggPath := filepath.Join(root, "_suggestions", "crear-usuario.md")
+	_, err = os.Stat(suggPath)
+	require.NoError(t, err, "suggestion should be persisted under _suggestions/")
+	assert.Contains(t, out, "Persisted to _suggestions/crear-usuario.md")
+
+	doc, ok := reg.overlayGet(conn, "acme", "crear-usuario")
+	require.True(t, ok)
+	assert.True(t, doc.Draft)
+
+	// Suggestions tool lists it; capabilities (non-draft) do not.
+	sug, err := reg.KnowledgeSuggestions(conn, "acme")
+	require.NoError(t, err)
+	assert.Contains(t, sug, "crear-usuario")
+	caps, err := reg.KnowledgeCapabilities(conn, "acme")
+	require.NoError(t, err)
+	assert.NotContains(t, caps, "crear-usuario")
+
+	// Promotion without confirmation only previews.
+	out, err = reg.KnowledgePromote(conn, "acme", "crear-usuario", false)
+	require.NoError(t, err)
+	assert.Contains(t, out, "confirm=true")
+	_, err = os.Stat(filepath.Join(root, "capabilities", "crear-usuario.md"))
+	assert.True(t, os.IsNotExist(err), "nothing is written without confirmation")
+
+	// Promotion with confirmation moves the draft to capabilities/.
+	out, err = reg.KnowledgePromote(conn, "acme", "crear-usuario", true)
+	require.NoError(t, err)
+	assert.Contains(t, out, "capabilities/crear-usuario.md")
+
+	_, err = os.Stat(suggPath)
+	assert.True(t, os.IsNotExist(err), "suggestion file should be removed after promotion")
+	_, err = os.Stat(filepath.Join(root, "capabilities", "crear-usuario.md"))
+	require.NoError(t, err, "promoted capability should be written")
+
+	prom, ok := reg.mergedLibrary(reg.apis["acme"], conn).Get("crear-usuario")
+	require.True(t, ok)
+	assert.False(t, prom.Draft)
+	assert.Len(t, prom.Steps, 2)
+
+	// It now shows as a real capability and no longer as a suggestion.
+	caps, err = reg.KnowledgeCapabilities(conn, "acme")
+	require.NoError(t, err)
+	assert.Contains(t, caps, "crear-usuario")
+	sug, err = reg.KnowledgeSuggestions(conn, "acme")
+	require.NoError(t, err)
+	assert.NotContains(t, sug, "crear-usuario")
+}
+
+func TestKnowledgeLearningDisabledKeepsOverlayOnly(t *testing.T) {
+	root := t.TempDir()
+	reg := NewRegistry("")
+	reg.mu.Lock()
+	reg.apis["acme"] = &apiEntry{Def: config.APIDefinition{
+		Name: "acme", Source: "/tmp/opencode/acme-spec.json",
+		Knowledge: config.KnowledgeConfig{Enabled: true, Root: root}, // learning off
+	}}
+	reg.mu.Unlock()
+	conn := "learn-2"
+
+	// Traces are only recorded when learning is enabled.
+	reg.RecordTrace(conn, "acme", "acme__list_users", map[string]interface{}{"site": "madrid"})
+	_, err := reg.RememberSequence(conn, "acme", "x")
+	assert.ErrorContains(t, err, "no recorded tool calls")
+
+	// With traces from an enabled window, the draft stays in the overlay only.
+	reg.apis["acme"].Def.Knowledge.Learning.Enabled = true
+	reg.RecordTrace(conn, "acme", "acme__list_users", map[string]interface{}{"site": "madrid"})
+	reg.apis["acme"].Def.Knowledge.Learning.Enabled = false
+	out, err := reg.RememberSequence(conn, "acme", "x")
+	require.NoError(t, err)
+	assert.Contains(t, out, "session overlay only")
+	_, err = os.Stat(filepath.Join(root, "_suggestions", "x.md"))
+	assert.True(t, os.IsNotExist(err), "learning disabled must not persist suggestions")
 }

@@ -24,3 +24,8 @@ go.work.sum
 !.env.example
 # Runtime state (created on first start)
 deploy/config/
+# Knowledge-store runtime state (created on first start)
+example/acme/kb-remote.git/
+example/acme/kb-checkout/
+# Delve debug artifacts
+__debug_bin*

@@ -9,20 +9,23 @@ import (
 
 // Knowledge management tool names.
 const (
-	ToolKnowledgeInit     = "knowledge_init"
-	ToolKnowledgeLoad     = "knowledge_load"
-	ToolKnowledgeStatus   = "knowledge_status"
-	ToolKnowledgeUpsert   = "knowledge_upsert"
-	ToolKnowledgeDelete   = "knowledge_delete"
-	ToolKnowledgeGet      = "knowledge_get"
-	ToolKnowledgeSearch   = "knowledge_search"
-	ToolKnowledgeClarify  = "knowledge_clarify"
-	ToolKnowledgeRemember = "knowledge_remember_sequence"
-	ToolCapabilities      = "capabilities"
-	ToolDiscoverTask      = "discover_task"
-	ToolUpdateKnowledge   = "update_api_knowledge"
-	ToolRunTask           = "run_task"
-	ToolKnowledgeReview   = "knowledge_review"
+	ToolKnowledgeInit        = "knowledge_init"
+	ToolKnowledgeLoad        = "knowledge_load"
+	ToolKnowledgeStatus      = "knowledge_status"
+	ToolKnowledgeUpsert      = "knowledge_upsert"
+	ToolKnowledgeDelete      = "knowledge_delete"
+	ToolKnowledgeGet         = "knowledge_get"
+	ToolKnowledgeSearch      = "knowledge_search"
+	ToolKnowledgeClarify     = "knowledge_clarify"
+	ToolKnowledgeRemember    = "knowledge_remember_sequence"
+	ToolKnowledgeSuggestions = "knowledge_suggestions"
+	ToolKnowledgePromote     = "knowledge_promote"
+	ToolCapabilities         = "capabilities"
+	ToolDiscoverTask         = "discover_task"
+	ToolUpdateKnowledge      = "update_api_knowledge"
+	ToolRunTask              = "run_task"
+	ToolKnowledgeReview      = "knowledge_review"
+	ToolKnowledgeSync        = "knowledge_sync"
 )
 
 // knowledgeToolNames is the set of knowledge management tools.
@@ -30,8 +33,9 @@ var knowledgeToolNames = map[string]bool{
 	ToolKnowledgeInit: true, ToolKnowledgeLoad: true, ToolKnowledgeStatus: true,
 	ToolKnowledgeUpsert: true, ToolKnowledgeDelete: true, ToolKnowledgeGet: true,
 	ToolKnowledgeSearch: true, ToolKnowledgeClarify: true, ToolKnowledgeRemember: true,
+	ToolKnowledgeSuggestions: true, ToolKnowledgePromote: true,
 	ToolCapabilities: true, ToolDiscoverTask: true, ToolUpdateKnowledge: true,
-	ToolRunTask: true, ToolKnowledgeReview: true,
+	ToolRunTask: true, ToolKnowledgeReview: true, ToolKnowledgeSync: true,
 }
 
 func isKnowledgeTool(name string) bool { return knowledgeToolNames[name] }
@@ -55,12 +59,12 @@ func buildKnowledgeTools() []mcp.Tool {
 		},
 		{
 			Name:        ToolKnowledgeLoad,
-			Description: "Index the API's knowledge library from disk (local backend). Reports the number of documents and validation warnings (broken links, unknown anchors, invalid capability steps).",
+			Description: "Index the API's knowledge library from disk. For a git backend with sync: auto it pulls (clone + rebase) the remote first. Reports the number of documents and validation warnings (broken links, unknown anchors, invalid capability steps).",
 			InputSchema: apiSchema(),
 		},
 		{
 			Name:        ToolKnowledgeStatus,
-			Description: "Report the API's knowledge state: enabled, language, root, backend type, documents count, library warnings and (later) git sync state.",
+			Description: "Report the API's knowledge state: enabled, language, root, backend type, documents count, library warnings and, for git backends, the current sync state (branch, HEAD, pending push, conflict).",
 			InputSchema: apiSchema(),
 		},
 		{
@@ -130,7 +134,7 @@ func buildKnowledgeTools() []mcp.Tool {
 		},
 		{
 			Name:        ToolKnowledgeRemember,
-			Description: "Create a capability draft in the session overlay from the tool calls recorded in this session (requires knowledge.learning enabled on the API). Persist it later with knowledge_upsert.",
+			Description: "Create a capability draft from the tool calls recorded in this session (requires knowledge.learning enabled on the API). With learning enabled the draft is persisted under _suggestions/; with it disabled the draft stays in the session overlay. Promote a persisted draft with knowledge_promote.",
 			InputSchema: mcp.Schema{
 				Type: "object",
 				Properties: map[string]mcp.Schema{
@@ -138,6 +142,24 @@ func buildKnowledgeTools() []mcp.Tool {
 					"name": {Type: "string", Description: "Id for the draft capability (optional)"},
 				},
 				Required: []string{"api"},
+			},
+		},
+		{
+			Name:        ToolKnowledgeSuggestions,
+			Description: "List the draft capability suggestions recorded by session learning (persisted under _suggestions/ or in the session overlay). Drafts are excluded from capabilities and run_task until promoted with knowledge_promote.",
+			InputSchema: apiSchema(),
+		},
+		{
+			Name:        ToolKnowledgePromote,
+			Description: "Promote a draft capability suggestion into the knowledge library: moves it from _suggestions/ (or the overlay) to capabilities/, clears its draft flag and re-indexes. Requires explicit confirmation via confirm=true; without it the tool only previews the promotion.",
+			InputSchema: mcp.Schema{
+				Type: "object",
+				Properties: map[string]mcp.Schema{
+					"api":        {Type: "string", Description: "Name of the registered API"},
+					"suggestion": {Type: "string", Description: "Draft capability id or _suggestions/ path to promote"},
+					"confirm":    {Type: "boolean", Description: "Explicit confirmation to promote (default false)"},
+				},
+				Required: []string{"api", "suggestion"},
 			},
 		},
 		{
@@ -208,6 +230,18 @@ func buildKnowledgeTools() []mcp.Tool {
 					"author_name_env":  {Type: "string", Description: "Host env var with git author name"},
 					"author_email_env": {Type: "string", Description: "Host env var with git author email"},
 					"learning":         {Type: "boolean", Description: "Enable session learning (trace-based capability drafts)"},
+				},
+				Required: []string{"api"},
+			},
+		},
+		{
+			Name:        ToolKnowledgeSync,
+			Description: "Manually synchronize the git-backed knowledge library of an API with its remote: pull (fetch + replay) or push (commit staged writes and upload, with a pull-rebase retry on divergence). action=auto (default) pulls then pushes. Applies only to backend type git; local backends are synced via the file system and knowledge_load.",
+			InputSchema: mcp.Schema{
+				Type: "object",
+				Properties: map[string]mcp.Schema{
+					"api":    {Type: "string", Description: "Name of the registered API"},
+					"action": {Type: "string", Enum: []interface{}{"pull", "push", "auto"}, Description: "Sync direction (default auto)"},
 				},
 				Required: []string{"api"},
 			},
@@ -332,6 +366,18 @@ func (r *Registry) runKnowledgeTool(connID, name string, args map[string]interfa
 			return errResult(err)
 		}
 		return okResult(out)
+	case ToolKnowledgeSuggestions:
+		out, err := r.KnowledgeSuggestions(connID, strArg(args, "api"))
+		if err != nil {
+			return errResult(err)
+		}
+		return okResult(out)
+	case ToolKnowledgePromote:
+		out, err := r.KnowledgePromote(connID, strArg(args, "api"), strArg(args, "suggestion"), boolArg(args, "confirm"))
+		if err != nil {
+			return errResult(err)
+		}
+		return okResult(out)
 	case ToolCapabilities:
 		out, err := r.KnowledgeCapabilities(connID, strArg(args, "api"))
 		if err != nil {
@@ -361,6 +407,12 @@ func (r *Registry) runKnowledgeTool(connID, name string, args map[string]interfa
 		return okResult(out)
 	case ToolKnowledgeReview:
 		out, err := r.KnowledgeReview(connID, strArg(args, "api"), strArg(args, "task"), strArg(args, "outcome"), strArg(args, "note"))
+		if err != nil {
+			return errResult(err)
+		}
+		return okResult(out)
+	case ToolKnowledgeSync:
+		out, err := r.SyncKnowledge(strArg(args, "api"), strArg(args, "action"))
 		if err != nil {
 			return errResult(err)
 		}

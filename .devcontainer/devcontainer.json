@@ -7,7 +7,6 @@
       "OPENCODE_VERSION": "latest"
     }
   },
-  "workspaceFolder": "/workspace",
   "runArgs": [
     "--init"
   ],
@@ -27,6 +26,5 @@
     8080,
     8099
   ],
-  "postCreateCommand": "bash ./.devcontainer/post-create.sh",
   "remoteUser": "vscode"
 }

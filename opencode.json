@@ -5,6 +5,14 @@
       "type": "remote",
       "url": "http://localhost:8086/mcp",
       "enabled": true
+    },
+    "mcp-debugger": {
+      "type": "local",
+      "command": [
+        "mcp-debugger",
+        "stdio"
+      ],
+      "enabled": true
     }
   }
 }

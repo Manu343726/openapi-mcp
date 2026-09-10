@@ -18,6 +18,14 @@ import (
 
 var kLog = logx.Module("knowledge")
 
+// suggestionsDir holds persistent capability drafts recorded from session
+// learning. Documents under it are indexed as Draft (kind capability) and are
+// excluded from capabilities/run_task until promoted with knowledge_promote.
+const suggestionsDir = "_suggestions/"
+
+// suggestionPathFor returns the library-relative path of a suggestion draft.
+func suggestionPathFor(id string) string { return suggestionsDir + id + ".md" }
+
 // knowledgeTrace is one recorded, successful tool call of a connection (only
 // when the owning API has learning enabled).
 type knowledgeTrace struct {
@@ -44,6 +52,73 @@ func knowledgeRoot(def config.APIDefinition, persistPath string) string {
 		}
 	}
 	return filepath.Join(dir, "knowledge", def.Name)
+}
+
+// backendFor returns the knowledge storage backend configured for an API. For
+// a git backend it resolves credentials and the commit identity from the host
+// environment (never from the config file).
+func (r *Registry) backendFor(entry *apiEntry) (knowledge.Backend, error) {
+	rb := entry.Def.Knowledge.ResolveKnowledgeBackend()
+	root := knowledgeRoot(entry.Def, r.persistPath)
+	if rb.Type != "git" {
+		return knowledge.NewLocalBackend(root), nil
+	}
+	authToken, sshKey := entry.Def.Knowledge.GitAuth()
+	author, email := entry.Def.Knowledge.GitIdentity()
+	return knowledge.NewGitBackend(root, knowledge.GitConfig{
+		Repository:  rb.Repository,
+		Branch:      rb.Branch,
+		Sync:        rb.Sync,
+		Conflict:    rb.Conflict,
+		AuthToken:   authToken,
+		SSHKey:      sshKey,
+		AuthorName:  author,
+		AuthorEmail: email,
+	}), nil
+}
+
+// gitBackendFor returns the configured git backend of an API (nil-callers
+// must check backend type == git first).
+func (r *Registry) gitBackendFor(entry *apiEntry) (*knowledge.GitBackend, error) {
+	be, err := r.backendFor(entry)
+	if err != nil {
+		return nil, err
+	}
+	gb, ok := be.(*knowledge.GitBackend)
+	if !ok {
+		return nil, fmt.Errorf("API %q knowledge backend is not git", entry.Def.Name)
+	}
+	return gb, nil
+}
+
+// loadLibrary indexes the API's knowledge library on disk into entry.Knowledge.
+// For a git backend with sync: auto it pulls (fetch + replay) the remote first;
+// a conflict leaves the checkout untouched and is reported as a warning.
+func (r *Registry) loadLibrary(entry *apiEntry) error {
+	if entry == nil {
+		return nil
+	}
+	root := knowledgeRoot(entry.Def, r.persistPath)
+	if gb, err := r.gitBackendFor(entry); err == nil {
+		if gb.SyncPolicy() == "auto" {
+			if err := gb.Pull(); err != nil && !knowledge.IsConflict(err) {
+				return fmt.Errorf("API %q: failed to sync knowledge library: %w", entry.Def.Name, err)
+			}
+			if knowledge.IsConflict(err) {
+				kLog.Warn("knowledge git pull hit a conflict; loading the current checkout", "api", entry.Def.Name, "error", err)
+			}
+		}
+	} else if entry.Def.Knowledge.ResolveKnowledgeBackend().Type == "git" {
+		return err
+	}
+	lib, err := knowledge.LoadLocal(root, knowledgeLoadOptions(entry))
+	if err != nil {
+		return fmt.Errorf("API %q: failed to load knowledge library: %w", entry.Def.Name, err)
+	}
+	r.mu.Lock()
+	entry.Knowledge = lib
+	r.mu.Unlock()
+	return nil
 }
 
 // knowledgeLoadOptions builds the anchor/step validation set for an entry.
@@ -112,6 +187,11 @@ func (r *Registry) KnowledgeStatus(apiName string) (string, error) {
 		fmt.Fprintf(&sb, "branch:         %s\n", orDefault(b.Branch, "main"))
 		fmt.Fprintf(&sb, "sync:           %s\n", b.Sync)
 		fmt.Fprintf(&sb, "conflict:       %s\n", b.Conflict)
+		if gb, err := r.gitBackendFor(entry); err == nil {
+			if st, err2 := gb.Status(); err2 == nil {
+				fmt.Fprintf(&sb, "sync-state:     %s\n", st.String())
+			}
+		}
 	}
 	fmt.Fprintf(&sb, "learning:       %v\n", kc.Learning.Enabled)
 	if entry.Knowledge == nil {
@@ -141,22 +221,11 @@ func (r *Registry) ensureKnowledge(entry *apiEntry) error {
 	if entry == nil || !entry.Def.Knowledge.Enabled || entry.Knowledge != nil {
 		return nil
 	}
-	b := entry.Def.Knowledge.ResolveKnowledgeBackend()
-	if b.Type == "git" {
-		return fmt.Errorf("API %q: git knowledge backend is not implemented yet; use type: local", entry.Def.Name)
-	}
-	root := knowledgeRoot(entry.Def, r.persistPath)
-	lib, err := knowledge.LoadLocal(root, knowledgeLoadOptions(entry))
-	if err != nil {
-		return fmt.Errorf("API %q: failed to load knowledge library: %w", entry.Def.Name, err)
-	}
-	r.mu.Lock()
-	entry.Knowledge = lib
-	r.mu.Unlock()
-	return nil
+	return r.loadLibrary(entry)
 }
 
-// LoadKnowledge indexes the API's knowledge library from disk (local backend).
+// LoadKnowledge indexes the API's knowledge library from disk. For a git
+// backend with sync: auto it pulls the remote first (clone on first use).
 // It reports the number of indexed documents and any library warnings.
 func (r *Registry) LoadKnowledge(apiName string) (string, error) {
 	entry, err := r.apiEntryFor(apiName)
@@ -166,28 +235,68 @@ func (r *Registry) LoadKnowledge(apiName string) (string, error) {
 	if !entry.Def.Knowledge.Enabled {
 		return "", fmt.Errorf("API %q has knowledge disabled (set knowledge.enabled and reload the API or use update_api_knowledge)", apiName)
 	}
-	if b := entry.Def.Knowledge.ResolveKnowledgeBackend(); b.Type == "git" {
-		return "", fmt.Errorf("API %q: git knowledge backend is not implemented yet (phase 2); use type: local", apiName)
+	if err := r.loadLibrary(entry); err != nil {
+		return "", err
 	}
-	root := knowledgeRoot(entry.Def, r.persistPath)
-	lib, err := knowledge.LoadLocal(root, knowledgeLoadOptions(entry))
-	if err != nil {
-		return "", fmt.Errorf("API %q: failed to load knowledge library: %w", apiName, err)
-	}
-
-	r.mu.Lock()
-	entry.Knowledge = lib
-	r.mu.Unlock()
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "Loaded %d document(s) from %s\n", len(lib.Docs), root)
-	for _, w := range lib.Warnings {
+	fmt.Fprintf(&b, "Loaded %d document(s) from %s\n", len(entry.Knowledge.Docs), knowledgeRoot(entry.Def, r.persistPath))
+	for _, w := range entry.Knowledge.Warnings {
 		fmt.Fprintf(&b, "WARN: %s\n", w)
 	}
-	if len(lib.Warnings) == 0 {
+	if len(entry.Knowledge.Warnings) == 0 {
 		b.WriteString("No warnings.")
 	}
 	return strings.TrimSpace(b.String()), nil
+}
+
+// SyncKnowledge manually pulls or pushes a git knowledge backend
+// (knowledge_sync). With action "auto" (or empty) it pulls then pushes.
+func (r *Registry) SyncKnowledge(apiName, action string) (string, error) {
+	entry, err := r.apiEntryFor(apiName)
+	if err != nil {
+		return "", err
+	}
+	if !entry.Def.Knowledge.Enabled {
+		return "", fmt.Errorf("API %q has knowledge disabled", apiName)
+	}
+	if rb := entry.Def.Knowledge.ResolveKnowledgeBackend(); rb.Type != "git" {
+		return "", fmt.Errorf("API %q uses a %q knowledge backend; git sync only applies to backend type git", apiName, rb.Type)
+	}
+	gb, err := r.gitBackendFor(entry)
+	if err != nil {
+		return "", err
+	}
+	switch action {
+	case "pull":
+		if err := gb.Pull(); err != nil {
+			return "", err
+		}
+	case "push":
+		if err := gb.Push(); err != nil {
+			if knowledge.IsPendingPush(err) || knowledge.IsConflict(err) {
+				return "", err
+			}
+			return "", err
+		}
+	case "auto", "":
+		if err := gb.Pull(); err != nil && !knowledge.IsConflict(err) {
+			return "", err
+		}
+		if err := gb.Push(); err != nil {
+			if knowledge.IsPendingPush(err) || knowledge.IsConflict(err) {
+				return "", err
+			}
+			return "", err
+		}
+	default:
+		return "", fmt.Errorf("invalid sync action %q (want pull|push|auto)", action)
+	}
+	st, err := gb.Status()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("API %q knowledge git sync (%s): %s", apiName, orDefault(action, "auto"), st.String()), nil
 }
 
 // mergedLibrary combines the persisted library with the per-connection overlay
@@ -282,9 +391,9 @@ func (r *Registry) KnowledgeUpsert(connID, apiName, content, docPath string, per
 		return fmt.Sprintf("Saved document %q in the session overlay (not persisted). Use persist=true to write it to the manual.", doc.ID), nil
 	}
 
-	b := entry.Def.Knowledge.ResolveKnowledgeBackend()
-	if b.Type == "git" {
-		return "", fmt.Errorf("git knowledge backend is not implemented yet (phase 2); use type: local")
+	backend, err := r.backendFor(entry)
+	if err != nil {
+		return "", err
 	}
 	data, err := knowledge.Serialize(doc)
 	if err != nil {
@@ -293,16 +402,23 @@ func (r *Registry) KnowledgeUpsert(connID, apiName, content, docPath string, per
 	if docPath == "" {
 		docPath = overlayPathFor(doc)
 	}
-	if err := os.MkdirAll(filepath.Dir(filepath.Join(knowledgeRoot(entry.Def, r.persistPath), docPath)), 0o755); err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(filepath.Join(knowledgeRoot(entry.Def, r.persistPath), filepath.FromSlash(docPath)), data, 0o644); err != nil {
+	if err := backend.WriteFile(docPath, data); err != nil {
 		return "", err
 	}
 	if _, err := r.LoadKnowledge(apiName); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("Persisted document %q to %s and re-indexed.", doc.ID, docPath), nil
+	msg := fmt.Sprintf("Persisted document %q to %s and re-indexed.", doc.ID, docPath)
+	if gb, ok := backend.(*knowledge.GitBackend); ok && gb.SyncPolicy() == "auto" {
+		if err := gb.Push(); err != nil {
+			if knowledge.IsPendingPush(err) {
+				return msg + " Committed locally; remote push is pending (it will retry on the next sync).", nil
+			}
+			return "", err
+		}
+		return msg + " Committed and pushed to the git repository.", nil
+	}
+	return msg, nil
 }
 
 // KnowledgeInit scaffolds the knowledge library for an API from the spec:
@@ -317,18 +433,14 @@ func (r *Registry) KnowledgeInit(apiName string, tags []string) (string, error) 
 	if !entry.Def.Knowledge.Enabled {
 		return "", fmt.Errorf("API %q has knowledge disabled (set knowledge.enabled and reload the API or use update_api_knowledge)", apiName)
 	}
-	if b := entry.Def.Knowledge.ResolveKnowledgeBackend(); b.Type == "git" {
-		return "", fmt.Errorf("git knowledge backend is not implemented yet (phase 2); use type: local")
-	}
 	lang := entry.Def.Knowledge.Language
 	if lang == "" {
 		lang = "en"
 	}
-	root := knowledgeRoot(entry.Def, r.persistPath)
-	if err := os.MkdirAll(root, 0o755); err != nil {
+	backend, err := r.backendFor(entry)
+	if err != nil {
 		return "", err
 	}
-	backend := knowledge.NewLocalBackend(root)
 
 	wrote := 0
 	write := func(rel, content string) error {
@@ -384,7 +496,14 @@ func (r *Registry) KnowledgeInit(apiName string, tags []string) (string, error) 
 	if _, err := r.LoadKnowledge(apiName); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("Scaffolded %d documents for API %q at %s (language %s). Edit them and run knowledge_load, or keep using knowledge_upsert.", wrote, apiName, root, lang), nil
+	msg := fmt.Sprintf("Scaffolded %d documents for API %q at %s (language %s). Edit them and run knowledge_load, or keep using knowledge_upsert.", wrote, apiName, knowledgeRoot(entry.Def, r.persistPath), lang)
+	if gb, ok := backend.(*knowledge.GitBackend); ok && gb.SyncPolicy() == "auto" {
+		if err := gb.Push(); err != nil && !knowledge.IsPendingPush(err) {
+			return "", err
+		}
+		msg += " The scaffolded documents have been committed and pushed to the git repository."
+	}
+	return msg, nil
 }
 
 func hasAnyTag(tags []string, set map[string]bool) bool {
@@ -610,8 +729,10 @@ func (r *Registry) ClarifyKnowledge(connID, apiName, intent string) (string, err
 	return strings.TrimSpace(b.String()), nil
 }
 
-// RememberSequence builds a capability draft in the overlay from the recorded
-// tool calls of this connection for the given API.
+// RememberSequence builds a capability draft from the recorded tool calls of
+// this connection for the given API. When the API has learning enabled the
+// draft is also persisted under "_suggestions/" so it survives the session;
+// otherwise it is kept in the per-connection overlay only.
 func (r *Registry) RememberSequence(connID, apiName, name string) (string, error) {
 	entry, err := r.apiEntryFor(apiName)
 	if err != nil {
@@ -668,7 +789,195 @@ func (r *Registry) RememberSequence(connID, apiName, name string) (string, error
 	}
 	r.sessionKnowledge[connID][apiName][doc.ID] = doc
 	r.mu.Unlock()
-	return fmt.Sprintf("Created draft capability %q in the session overlay from %d call(s). Persist it with knowledge_upsert (persist=true).", doc.ID, len(calls)), nil
+
+	msg := fmt.Sprintf("Created draft capability %q from %d call(s).", doc.ID, len(calls))
+	if !entry.Def.Knowledge.Learning.Enabled {
+		return msg + " Knowledge learning is disabled; the draft was kept in the session overlay only (enable knowledge.learning to persist suggestions).", nil
+	}
+
+	backend, err := r.backendFor(entry)
+	if err != nil {
+		return "", err
+	}
+	data, err := knowledge.Serialize(doc)
+	if err != nil {
+		return "", err
+	}
+	rel := suggestionPathFor(doc.ID)
+	doc.Path = rel
+	if err := backend.WriteFile(rel, data); err != nil {
+		return "", err
+	}
+	msg += fmt.Sprintf(" Persisted to %s as a draft; promote it with knowledge_promote (confirm=true) to make it a real capability.", rel)
+	return pushAfterEdit(backend, msg)
+}
+
+// KnowledgeSuggestions lists the knowledge library's draft capability
+// suggestions (library + session overlay): the output of session learning that
+// has not been promoted yet.
+func (r *Registry) KnowledgeSuggestions(connID, apiName string) (string, error) {
+	entry, err := r.apiEntryFor(apiName)
+	if err != nil {
+		return "", err
+	}
+	payload := make([]map[string]interface{}, 0)
+	for _, d := range r.mergedLibrary(entry, connID).Docs {
+		if d.Kind != knowledge.KindCapability || !d.Draft {
+			continue
+		}
+		payload = append(payload, map[string]interface{}{
+			"id":      d.ID,
+			"title":   d.Title,
+			"path":    d.Path,
+			"summary": d.Summary,
+			"intents": d.Intents,
+			"params":  d.ParamNames(),
+			"steps":   len(d.Steps),
+		})
+	}
+	body, _ := json.MarshalIndent(map[string]interface{}{
+		"api":         apiName,
+		"suggestions": payload,
+	}, "", "  ")
+	return string(body), nil
+}
+
+// findSuggestion resolves a draft capability (id or library path) among the
+// merged library and reports whether it is a draft.
+func (r *Registry) findSuggestion(entry *apiEntry, connID, ref string) (*knowledge.Doc, bool) {
+	if ref == "" {
+		return nil, false
+	}
+	for _, d := range r.mergedLibrary(entry, connID).Docs {
+		if d.Kind != knowledge.KindCapability || !d.Draft {
+			continue
+		}
+		if d.ID == ref || d.Path == ref || strings.TrimPrefix(ref, "/") == d.Path {
+			return d, true
+		}
+	}
+	return nil, false
+}
+
+// suggestionSource returns the canonical content of a suggestion: the
+// persisted draft file when it exists, otherwise the overlay copy.
+func (r *Registry) suggestionSource(entry *apiEntry, connID string, doc *knowledge.Doc) (*knowledge.Doc, error) {
+	if strings.HasPrefix(doc.Path, "_suggestions/") {
+		backend, err := r.backendFor(entry)
+		if err != nil {
+			return nil, err
+		}
+		if data, err := backend.ReadFile(doc.Path); err == nil {
+			if p, perr := knowledge.ParseDoc(data); perr == nil {
+				return p, nil
+			}
+		}
+	}
+	if d, ok := r.overlayGet(connID, entry.Def.Name, doc.ID); ok {
+		return d, nil
+	}
+	return doc, nil
+}
+
+// overlayRemove deletes a single document from a connection's overlay.
+func (r *Registry) overlayRemove(connID, apiName, id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if m := r.sessionKnowledge[connID]; m != nil {
+		if inner := m[apiName]; inner != nil {
+			delete(inner, id)
+		}
+	}
+}
+
+// KnowledgePromote turns a draft capability suggestion into a real capability:
+// it moves the document from "_suggestions/" (or the overlay) to
+// "capabilities/", clears the draft flag and re-indexes. Promotion requires
+// explicit confirmation via confirm=true (it only ever previews otherwise).
+func (r *Registry) KnowledgePromote(connID, apiName, suggestion string, confirm bool) (string, error) {
+	entry, err := r.apiEntryFor(apiName)
+	if err != nil {
+		return "", err
+	}
+	if !entry.Def.Knowledge.Enabled {
+		return "", fmt.Errorf("API %q has knowledge disabled", apiName)
+	}
+	doc, found := r.findSuggestion(entry, connID, suggestion)
+	if !found {
+		return "", fmt.Errorf("no draft capability %q found; list drafts with knowledge_suggestions", suggestion)
+	}
+	if !confirm {
+		var b strings.Builder
+		fmt.Fprintf(&b, "Suggestion %q (draft at %s) would be promoted to a real capability (%s)", doc.ID, doc.Path, overlayPathFor(doc))
+		if len(doc.Intents) > 0 {
+			fmt.Fprintf(&b, " with intents %v", doc.Intents)
+		}
+		if len(doc.Steps) > 0 {
+			fmt.Fprintf(&b, " and %d step(s)", len(doc.Steps))
+		}
+		b.WriteString(". Pass confirm=true to promote it.")
+		return strings.TrimSpace(b.String()), nil
+	}
+	if !validDocID(doc.ID) {
+		return "", fmt.Errorf("invalid suggestion id %q", doc.ID)
+	}
+
+	backend, err := r.backendFor(entry)
+	if err != nil {
+		return "", err
+	}
+	up, err := r.suggestionSource(entry, connID, doc)
+	if err != nil {
+		return "", err
+	}
+	up.Draft = false
+	if up.ID == "" {
+		up.ID = doc.ID
+	}
+	if up.API == "" {
+		up.API = apiName
+	}
+	if up.Language == "" {
+		up.Language = entry.Def.Knowledge.Language
+	}
+
+	data, err := knowledge.Serialize(up)
+	if err != nil {
+		return "", err
+	}
+	target := overlayPathFor(up)
+	if err := backend.WriteFile(target, data); err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(doc.Path, "_suggestions/") {
+		if err := backend.DeleteFile(doc.Path); err != nil && !os.IsNotExist(err) {
+			return "", err
+		}
+	}
+	r.overlayRemove(connID, apiName, doc.ID)
+
+	if _, err := r.LoadKnowledge(apiName); err != nil {
+		return "", err
+	}
+	msg := fmt.Sprintf("Promoted draft %q to capability %q and re-indexed.", doc.ID, target)
+	return pushAfterEdit(backend, msg)
+}
+
+// pushAfterEdit appends the git sync result of an edit that was performed
+// through a backend: on a git backend with sync auto it pushes and mentions the
+// outcome; otherwise the message is returned unchanged.
+func pushAfterEdit(backend knowledge.Backend, msg string) (string, error) {
+	gb, ok := backend.(*knowledge.GitBackend)
+	if !ok || gb.SyncPolicy() != "auto" {
+		return msg, nil
+	}
+	if err := gb.Push(); err != nil {
+		if knowledge.IsPendingPush(err) {
+			return msg + " Committed locally; remote push is pending (it will retry on the next sync).", nil
+		}
+		return "", err
+	}
+	return msg + " Committed and pushed to the git repository.", nil
 }
 
 // RecordTrace records a successful tool call for learning (no-op unless enabled).
