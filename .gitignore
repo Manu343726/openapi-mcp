@@ -27,5 +27,7 @@ deploy/config/
 # Knowledge-store runtime state (created on first start)
 example/acme/kb-remote.git/
 example/acme/kb-checkout/
+# opencode session/state persistence (bound into ~/.local/share/opencode)
+.opencode/
 # Delve debug artifacts
 __debug_bin*
