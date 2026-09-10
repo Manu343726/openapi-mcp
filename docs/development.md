@@ -1,8 +1,156 @@
-# Development notes & known quirks
+# Development notes
 
-Things to keep in mind when touching this codebase. None of these are bugs to
-"fix" blindly; they are deliberate constraints that the tests and behavior rely
-on.
+How to build, test, and exercise the MCP server, plus the known quirks and
+deliberate constraints that the tests and behavior rely on. None of these quirks
+are bugs to "fix" blindly — they are deliberate.
+
+## Prerequisites
+
+- **Go 1.25+.** The module requires `go 1.25.0` (OpenAPI 3.1 support via
+  `kin-openapi` v0.149.0). Use one of the versioned toolchains if the base image
+  is older, e.g.:
+  ```sh
+  go install golang.org/dl/go1.25.0@latest
+  go1.25.0 download
+  # then "go1.25.0 test ./..." replaces "go test ./..."
+  ```
+  `Dockerfile` builds with `GO_VERSION=1.25`.
+- The `Makefile` targets assume a Go toolchain that supports the module version.
+
+## Build, run, test
+
+```sh
+make deps        # go mod download
+make build       # CGO_ENABLED=0 go build -o bin/openapi-mcp ./cmd/openapi-mcp
+make run         # build + run on --port 8080 (no config file)
+make run-server  # build + run against .config/config.yaml (persists runtime registrations)
+make test        # go test ./...  (see the timeout caveat below)
+make clean
+```
+
+Directly:
+
+```sh
+go build ./...                       # compile check without emitting a binary
+bin/openapi-mcp --port 8080
+bin/openapi-mcp --config .config/config.yaml --port 8086
+bin/openapi-mcp --log-level debug    # structured logs on stdout
+```
+
+### Test timeout caveat
+
+`go test ./...` may hang without a network / longer timeout: one package's tests
+need internet/SSE. Run the suite with a generous timeout if you hit it:
+
+```sh
+go test -timeout 300s ./...
+```
+
+If a run hangs, identify the offending package (`go test ./...` with `-v`, or
+bisect `go test ./pkg/...` one package at a time) and give it `-timeout
+600s` or network access. The parser, config, knowledge, and logx packages are
+safe to run offline (`go test ./pkg/parser/... ./pkg/config/... ./pkg/knowledge/... ./pkg/logx/...`).
+
+## Testing the MCP end-to-end
+
+The server speaks JSON-RPC 2.0 over two transports — legacy SSE and streamable
+HTTP, both under `/mcp`. Start it with a spec to test against, then issue raw
+JSON-RPC requests. No MCP client is required.
+
+### 1. Start the server with a test spec
+
+Pick a spec from the reference list below, then run:
+
+```sh
+# remote spec via config file
+cat > /tmp/test-config.yaml <<'EOF'
+server:
+  port: 18080
+apis:
+  - name: petstore
+    source: https://petstore3.swagger.io/api/v3/openapi.json
+    targets:
+      - name: default
+        base_url: https://petstore3.swagger.io/api/v3
+EOF
+bin/openapi-mcp --config /tmp/test-config.yaml
+```
+
+Or start with no config and register the API at runtime through MCP tools
+(`register_openapi_api`), which persists everything back to the config file.
+
+### 2. Hand-roll JSON-RPC over streamable HTTP
+
+```sh
+# initialize
+curl -s -X POST http://localhost:18080/mcp \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0.0.1"}}}'
+
+# list the generated tools
+curl -s -X POST http://localhost:18080/mcp \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+
+# call a tool (petstore)
+curl -s -X POST http://localhost:18080/mcp \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"petstore__findPetsByStatus","arguments":{"status":"available"}}}'
+
+# management / introspection tools are plain MCP tools too
+curl -s -X POST http://localhost:18080/mcp -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_openapi_apis","arguments":{}}}'
+curl -s -X POST http://localhost:18080/mcp -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"describe_openapi_api","arguments":{"api":"petstore"}}}'
+```
+
+`preview_api_call` is a dry run — it returns the exact HTTP request a tool call
+would send (method, URL, headers, body) **without** executing it. Use it to
+verify parameter serialization, target resolution, and auth header injection
+before anything hits the network.
+
+To debug the request the server would actually emit, use `preview_api_call` for
+a fully offline check; to hit a real API, call the tool.
+
+### 3. Reference OpenAPI specs for manual / integration testing
+
+The [awesome-openapi-specs](https://github.com/bhavyshekhaliya/awesome-openapi-specs)
+catalog lists real-world provider specs (it has no petstore-style stubs — those
+are real APIs). Useful ones for testing this MCP, roughly ordered by usefulness:
+
+| Provider | Spec | Notes |
+|----------|------|-------|
+| Petstore v3 | `https://petstore3.swagger.io/api/v3/openapi.json` | The classic test stub (not in the catalog); ideal for a first smoke test |
+| U.S. National Weather Service | `https://api.weather.gov/openapi.json` | **No auth**, clean OpenAPI 3.1 JSON; great for validating 3.1 parsing and live calls |
+| Discourse | `https://docs.discourse.org/openapi.json` | Free, community-run, 3.1 JSON |
+| People Data Labs | `https://raw.githubusercontent.com/peopledatalabs/openAPI-specifications/master/pdl-specs.json` | 3.0 JSON, API-key auth |
+| Geoapify (geocoding) | `https://raw.githubusercontent.com/geoapify/geoapify-openapi-specs/refs/heads/main/api-specs/geocoding/forward_geocoding.yaml` | 3.0 YAML, API-key auth |
+| Open Education API | `https://raw.githubusercontent.com/open-education-api/specification/main/oeapi.yaml` | Very small, focused, YAML |
+| ApostropheCMS | `https://raw.githubusercontent.com/apostrophecms/apostrophecms-openapi/main/apostrophecms-openapi.yaml` | CMS, no auth |
+| Hostinger | `https://raw.githubusercontent.com/hostinger/api/main/openapi.json` | Small, focused, JSON |
+| Stytch | `https://raw.githubusercontent.com/stytchauth/stytch-openapi/main/openapi.yml` | 3.0.3 auth-heavy spec — exercises `securitySchemes` inference |
+| Paystack | `https://raw.githubusercontent.com/PaystackOSS/openapi/main/dist/paystack.yaml` | Payments, auth-heavy |
+| Resend | `https://raw.githubusercontent.com/resend/resend-openapi/main/resend.yaml` | 3.1, modern YAML |
+| Trello | `https://developer.atlassian.com/cloud/trello/swagger.v3.json` | Large 3.0 spec — good for tool-name truncation and scale checks |
+
+Suggestions for what to test against each:
+
+- **Parsing / validation** (smoke test): Petstore v3, NWS, OE API.
+- **OpenAPI 3.1 path**: NWS (`/openapi.json`), Discourse, Resend.
+- **Auth inference** (`securitySchemes` → API-level `auth`): People Data Labs,
+  Geoapify, Stytch, Paystack. Register the spec, then `describe_openapi_api` and
+  confirm the inferred auth in `export_openapi_config`.
+- **Tool-name truncation / scale**: Trello (many operations), then verify the
+  capped `<api>__<operationId>` names appear consistently in `tools/list`, tool
+  descriptions, and `search_openapi_operations`.
+- **Live reads** (no key needed): Petstore v3, NWS, Discourse, OE API.
+
+Use `make run-server` and `register_openapi_api` at runtime to iterate without
+editing the config file by hand.
+
+## Known quirks
+
+These are deliberate constraints — the tests and behavior rely on them.
 
 ## OpenAPI 3.1 support
 
