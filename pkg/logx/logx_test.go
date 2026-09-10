@@ -66,6 +66,27 @@ func TestLevelFiltering(t *testing.T) {
 	assert.Contains(t, out, "visible error")
 }
 
+func TestSetLevelChangesOnTheFly(t *testing.T) {
+	var buf bytes.Buffer
+	Configure(&buf, slog.LevelInfo)
+	lg := Module("server")
+
+	lg.Debug("hidden debug")
+	assert.Empty(t, buf.String())
+
+	// Raise verbosity at runtime; the very next call is emitted.
+	SetLevelString("debug")
+	lg.Debug("now visible")
+	assert.Contains(t, buf.String(), "now visible")
+
+	// And the current level is readable.
+	assert.Equal(t, slog.LevelDebug, Level())
+
+	// An invalid level name is rejected and leaves the level unchanged.
+	require.Error(t, SetLevelString("loud"))
+	assert.Equal(t, slog.LevelDebug, Level())
+}
+
 func TestModuleAttributeAndUntagged(t *testing.T) {
 	var buf bytes.Buffer
 	Configure(&buf, slog.LevelInfo)

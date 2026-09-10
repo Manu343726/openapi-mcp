@@ -28,6 +28,32 @@ const (
 	VersionV3 = "v3"
 )
 
+// allowedRefSiblings lists the non-extension fields that may legally appear
+// alongside a $ref in the wild. JSON Schema 2020-12 (OpenAPI 3.1) allows any
+// keyword next to $ref; OpenAPI 3.0 does not, yet many real-world 3.0 specs
+// (and spec generators) emit $ref with sibling description/readOnly/type/etc.
+// Allowing them keeps such specs loadable while still validating everything
+// else. kin-openapi only auto-relaxes this for 3.1 documents, so 3.0 specs need
+// the explicit list.
+var allowedRefSiblings = []string{
+	"description", "summary", "title", "type", "format", "items", "properties",
+	"required", "readOnly", "writeOnly", "example", "examples", "default", "enum",
+	"nullable", "deprecated", "allOf", "anyOf", "oneOf", "not", "externalDocs",
+	"xml", "discriminator", "additionalProperties", "minItems", "maxItems",
+	"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minLength",
+	"maxLength", "pattern", "uniqueItems", "minProperties", "maxProperties",
+	"contentEncoding", "contentMediaType",
+}
+
+// validationOpts returns the validation options applied to every loaded spec.
+func validationOpts() []openapi3.ValidationOption {
+	return []openapi3.ValidationOption{
+		openapi3.DisableExamplesValidation(),
+		openapi3.DisableSchemaDefaultsValidation(),
+		openapi3.AllowExtraSiblingFields(allowedRefSiblings...),
+	}
+}
+
 // detectVersion returns the top-level keys of a spec document when it can be
 // parsed. It is tolerant of both YAML and JSON (YAML is a superset of JSON),
 // so YAML specs remain detectable.
@@ -123,7 +149,7 @@ func LoadSwagger(location string) (interface{}, string, error) {
 			return nil, "", fmt.Errorf("failed to load OpenAPI v3 spec from '%s': %w", location, loadErr)
 		}
 
-		if err := doc.Validate(openapi3.WithValidationOptions(context.Background(), openapi3.DisableExamplesValidation(), openapi3.DisableSchemaDefaultsValidation())); err != nil {
+		if err := doc.Validate(context.Background(), validationOpts()...); err != nil {
 			return nil, "", fmt.Errorf("OpenAPI v3 spec validation failed for '%s': %w", location, err)
 		}
 		return doc, VersionV3, nil
@@ -205,7 +231,7 @@ func LoadSwaggerFromBytes(data []byte, origin string) (interface{}, string, erro
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to load OpenAPI v3 spec from '%s': %w", origin, err)
 		}
-		if err := doc.Validate(openapi3.WithValidationOptions(context.Background(), openapi3.DisableExamplesValidation(), openapi3.DisableSchemaDefaultsValidation())); err != nil {
+		if err := doc.Validate(context.Background(), validationOpts()...); err != nil {
 			return nil, "", fmt.Errorf("OpenAPI v3 spec validation failed for '%s': %w", origin, err)
 		}
 		return doc, VersionV3, nil

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"strings"
 
 	"github.com/ckanthony/openapi-mcp/pkg/config"
 	"github.com/ckanthony/openapi-mcp/pkg/logx"
@@ -76,6 +77,14 @@ func main() {
 	port := *portFlag
 	if fc != nil {
 		port = fc.EffectiveServerPort(port)
+		// The config file may set the log level; it overrides --log-level.
+		if lvl := fc.Server.LogLevel; lvl != "" {
+			if err := logx.SetLevelString(lvl); err != nil {
+				log.Warn("ignoring invalid server.log_level in config", "level", lvl, "error", err)
+			} else {
+				log.Info("log level set from config file", "level", strings.ToLower(logx.Level().String()))
+			}
+		}
 	}
 	addr := fmt.Sprintf(":%d", port)
 	log.Info("starting MCP server", "addr", addr)

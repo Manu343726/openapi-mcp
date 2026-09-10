@@ -33,11 +33,17 @@ import (
 
 // state is the mutable, handler-shared configuration: the writer and the
 // minimum level. Derived handlers (WithAttrs/WithGroup) share one *state, so
-// Configure() affects every module logger.
+// Configure()/SetLevel() affect every module logger.
+//
+// The minimum level is a slog.LevelVar: an atomic value that let the level be
+// varied dynamically at runtime (see log/slog docs: "Setting HandlerOptions.Level
+// to a LevelVar allows the level to be varied dynamically ... programLevel.Set(
+// slog.LevelDebug)"). Every Enabled check reads it, so changing it takes effect
+// on the very next log statement.
 type state struct {
 	mu    sync.RWMutex
 	w     io.Writer
-	level slog.Level
+	level slog.LevelVar
 
 	// writeMu serializes line writes so concurrent loggers never interleave
 	// bytes mid-line.
@@ -53,20 +59,43 @@ type Handler struct {
 
 // defaultState is used until Configure is called.
 var defaultState = &state{
-	w:     io.Discard,
-	level: slog.LevelInfo,
+	w: io.Discard,
 }
 
 // standard is the shared root handler used by Module.
 var standard = &Handler{state: defaultState}
 
 // Configure points the application logger at w with the given minimum level.
-// It affects every logger returned by Module.
+// It affects every logger returned by Module. The level can still be changed
+// afterwards with SetLevel.
 func Configure(w io.Writer, level slog.Level) {
 	defaultState.mu.Lock()
 	defaultState.w = w
-	defaultState.level = level
 	defaultState.mu.Unlock()
+	defaultState.level.Set(level)
+}
+
+// SetLevel changes the minimum log level on the fly. It is safe to call from
+// any goroutine and takes effect immediately; the fmt-level names are
+// "debug", "info", "warn" and "error".
+func SetLevel(level slog.Level) {
+	defaultState.level.Set(level)
+}
+
+// Level returns the current minimum log level.
+func Level() slog.Level {
+	return defaultState.level.Level()
+}
+
+// SetLevelString parses a level name ("debug", "info", "warn"/"warning",
+// "error") and applies it. It returns a descriptive error for unknown names.
+func SetLevelString(s string) error {
+	level, err := ParseLevel(s)
+	if err != nil {
+		return err
+	}
+	SetLevel(level)
+	return nil
 }
 
 // Module returns a logger tagged with module, so every emitted line is prefixed
@@ -94,9 +123,7 @@ func ParseLevel(s string) (slog.Level, error) {
 
 // Enabled implements slog.Handler.
 func (h *Handler) Enabled(_ context.Context, level slog.Level) bool {
-	h.state.mu.RLock()
-	defer h.state.mu.RUnlock()
-	return level >= h.state.level
+	return level >= h.state.level.Level()
 }
 
 // WithAttrs implements slog.Handler.

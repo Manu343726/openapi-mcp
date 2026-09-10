@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ckanthony/openapi-mcp/pkg/config"
+	"github.com/ckanthony/openapi-mcp/pkg/logx"
 	"github.com/ckanthony/openapi-mcp/pkg/mcp"
 )
 
@@ -34,6 +35,7 @@ const (
 	ToolReloadConfig = "reload_config"
 	ToolReloadAPI    = "reload_api"
 	ToolCheckSpec    = "check_api_spec"
+	ToolSetLogLevel  = "set_log_level"
 	ToolPreviewCall  = "preview_api_call"
 
 	// Target management.
@@ -208,6 +210,11 @@ func buildManagementTools() []mcp.Tool {
 			Name:        ToolCheckSpec,
 			Description: "Check whether a registered API's loaded spec is stale: compares the spec-source timestamp recorded at load time against the current source mtime/Last-Modified, and reports up-to-date / outdated / unknown. Use reload_api to re-read a spec that changed.",
 			InputSchema: nameOnlySchema("api", "Name of the registered API"),
+		},
+		{
+			Name:        ToolSetLogLevel,
+			Description: "Change the server's minimum log level on the fly (no restart): debug, info, warn or error. Takes effect immediately and is recorded in the config file (server.log_level) when persistence is enabled.",
+			InputSchema: nameOnlySchema("level", "Minimum log level to emit (debug, info, warn or error)"),
 		},
 		{
 			Name:        ToolPreviewCall,
@@ -628,11 +635,23 @@ func (r *Registry) runManagementTool(connID, name string, args map[string]interf
 		if len(messages) == 0 {
 			return okResult("Config file has no APIs to register.")
 		}
+		// Apply server.log_level from the (possibly edited) config file.
+		if lvl := r.ServerConfig().LogLevel; lvl != "" {
+			if err := logx.SetLevelString(lvl); err != nil {
+				logx.Module("management").Warn("ignoring invalid server.log_level during config reload", "level", lvl, "error", err)
+			}
+		}
 		var b strings.Builder
 		for _, m := range messages {
 			b.WriteString("- " + m + "\n")
 		}
 		return okResult(strings.TrimSpace(b.String()))
+	case ToolSetLogLevel:
+		level := strArg(args, "level")
+		if err := r.SetServerLogLevel(level); err != nil {
+			return errResult(err)
+		}
+		return okResult(fmt.Sprintf("Log level set to %q (was recorded in the server config).", level))
 	case ToolCheckSpec:
 		api := strArg(args, "api")
 		loadedAt, current, status, err := r.CheckSpecState(api)

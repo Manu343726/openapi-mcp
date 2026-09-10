@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -35,6 +37,14 @@ const (
 	// monitorLogger is the RFC5424 logger name attached to the
 	// notifications/message events emitted when a monitored spec changes.
 	monitorLogger = "openapi-mcp.monitoring"
+
+	// maxToolNameLen caps the fully-qualified tool name (api__operation) exposed
+	// to MCP clients. Model providers reject function names longer than 128
+	// characters, and clients such as opencode prepend "<server>_" to every MCP
+	// tool name, so the server-side name must stay comfortably below that bound.
+	// Longer names are truncated and disambiguated with a short, deterministic
+	// hash suffix so lookups stay unique and stable across rebuilds.
+	maxToolNameLen = 100
 )
 
 var (
@@ -158,10 +168,25 @@ func validateAPIName(name string) error {
 }
 
 func toolFullName(apiName, toolName string) string {
-	if apiName == "" {
-		return toolName
+	full := toolName
+	if apiName != "" {
+		full = apiName + toolNameSep + toolName
 	}
-	return apiName + toolNameSep + toolName
+	return capToolName(full)
+}
+
+// capToolName bounds a fully-qualified tool name to maxToolNameLen characters.
+// When truncation is needed it appends a short deterministic hash of the original
+// name, keeping the mapping stable and collision-free across rebuilds while
+// staying within the character set accepted by model providers.
+func capToolName(name string) string {
+	if len(name) <= maxToolNameLen {
+		return name
+	}
+	sum := sha1.Sum([]byte(name))
+	suffix := hex.EncodeToString(sum[:])[:8]
+	keep := maxToolNameLen - len(suffix) - 1
+	return name[:keep] + "_" + suffix
 }
 
 // normalizeDefinition trims fields, defaults target names, validates the API's
@@ -903,6 +928,27 @@ func (r *Registry) ReloadFromConfig(path string) ([]string, error) {
 		}
 	}
 	return messages, nil
+}
+
+// SetServerLogLevel validates a level name, applies it process-wide on the fly
+// (blog/slog pattern: the handler's minimal level is backed by a slog.LevelVar,
+// so it changes immediately without a restart), and records it in the server
+// config so it survives restarts when a config file is configured.
+func (r *Registry) SetServerLogLevel(value string) error {
+	parsed, err := logx.ParseLevel(value)
+	if err != nil {
+		return err
+	}
+	logx.SetLevel(parsed)
+	r.mu.Lock()
+	r.server.LogLevel = value
+	err = r.persist(r.apis)
+	r.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	regLog.Info("log level changed", "level", strings.ToLower(parsed.String()))
+	return nil
 }
 
 // SpecStatus values returned by CheckSpecState and ReloadAPI. They describe how

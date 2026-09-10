@@ -303,6 +303,12 @@ type ServerConfig struct {
 	// Port is the port the MCP HTTP server listens on. When set in the config
 	// file it overrides the --port flag.
 	Port int `json:"port,omitempty" yaml:"port,omitempty"`
+
+	// LogLevel is the minimum log level emitted by the server: "debug", "info",
+	// "warn" or "error". It overrides --log-level and is applied at startup and
+	// on every reload_config (and can be changed at runtime via the
+	// set_log_level management tool). Empty keeps the flag default.
+	LogLevel string `json:"log_level,omitempty" yaml:"log_level,omitempty"`
 }
 
 // FileConfig is the persisted configuration file format. It lists every API the

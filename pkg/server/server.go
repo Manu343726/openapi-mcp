@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -725,6 +727,69 @@ func broadcastLogMessage(level, logger string, data interface{}) {
 
 // executeToolCall performs the actual HTTP request based on the resolved operation and parameters.
 // It now correctly handles API key injection based on the *cfg* parameter.
+// formatScalar renders a JSON-decoded scalar for use in a URL/path/query.
+// encoding/json decodes every JSON number into a float64, and Go's default %v
+// formatting switches to scientific notation for large integral values (e.g.
+// 1789037393 became "1.789037393e+09", which APIs then reject). Integral
+// floats are therefore emitted as plain integers and other floats without an
+// exponent.
+func formatScalar(value interface{}) string {
+	const (
+		maxInt64 = float64(1 << 63)
+		minInt64 = -maxInt64
+	)
+	switch v := value.(type) {
+	case float64:
+		if !math.IsNaN(v) && !math.IsInf(v, 0) && v == math.Trunc(v) && v >= minInt64 && v < maxInt64 {
+			return strconv.FormatInt(int64(v), 10)
+		}
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case float32:
+		f := float64(v)
+		if !math.IsNaN(f) && !math.IsInf(f, 0) && f == math.Trunc(f) && f >= minInt64 && f < maxInt64 {
+			return strconv.FormatInt(int64(f), 10)
+		}
+		return strconv.FormatFloat(f, 'f', -1, 32)
+	default:
+		return fmt.Sprintf("%v", value)
+	}
+}
+
+// paramValueStrings flattens a parameter value into the strings to put on the
+// wire. Scalar values yield a single element; array values (as sent in a tool's
+// input) yield one element per item so they are transmitted as repeated
+// query/header/cookie parameters (OpenAPI default style=form, explode=true),
+// rather than as a single "[a b]" literal.
+func paramValueStrings(value interface{}) []string {
+	switch v := value.(type) {
+	case []interface{}:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			out = append(out, formatScalar(item))
+		}
+		return out
+	case nil:
+		return nil
+	default:
+		return []string{formatScalar(value)}
+	}
+}
+
+// appendParamValues adds a (possibly array) value to query parameters, emitting
+// one repeated key per array item.
+func appendParamValues(values url.Values, key string, value interface{}) {
+	for _, v := range paramValueStrings(value) {
+		values.Add(key, v)
+	}
+}
+
+// appendHeaderValues adds a (possibly array) value to headers as repeated keys.
+func appendHeaderValues(headers http.Header, key string, value interface{}) {
+	for _, v := range paramValueStrings(value) {
+		headers.Add(key, v)
+	}
+}
+
 func buildToolRequest(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.Config) (*http.Request, error) {
 	toolName := params.ToolName
 	toolInput := params.Input // This is the map[string]interface{} from the client
@@ -788,19 +853,21 @@ func buildToolRequest(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.
 
 		if strings.Contains(path, pathPlaceholder) {
 			// Handle path parameter substitution
-			pathParams[key] = fmt.Sprintf("%v", value)
+			pathParams[key] = formatScalar(value)
 			tcLog.Debug("found path parameter", "param", key, "value", fmt.Sprintf("%v", value))
 		} else if knownParam {
 			// Handle parameters defined in the spec (query, header, cookie)
 			switch paramLocation {
 			case "query":
-				queryParams.Add(key, fmt.Sprintf("%v", value))
+				appendParamValues(queryParams, key, value)
 				tcLog.Debug("found query parameter", "param", key, "value", fmt.Sprintf("%v", value))
 			case "header":
-				headerParams.Add(key, fmt.Sprintf("%v", value))
+				appendHeaderValues(headerParams, key, value)
 				tcLog.Debug("found header parameter", "param", key, "value", fmt.Sprintf("%v", value))
 			case "cookie":
-				cookieParams = append(cookieParams, &http.Cookie{Name: key, Value: fmt.Sprintf("%v", value)})
+				for _, v := range paramValueStrings(value) {
+					cookieParams = append(cookieParams, &http.Cookie{Name: key, Value: v})
+				}
 				tcLog.Debug("found cookie parameter", "param", key, "value", fmt.Sprintf("%v", value))
 				// case "formData": // TODO: Handle form data if needed
 				// 	bodyData[key] = value // Or handle differently based on content type
@@ -811,7 +878,7 @@ func buildToolRequest(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.
 					// If spec says 'path' but it wasn't in the actual path, and it's a GET/DELETE,
 					// treat it as a query parameter as a fallback.
 					tcLog.Warn("parameter is 'path' in spec but not in URL path; adding to query parameters as fallback for GET/DELETE", "param", key, "path", operation.Path)
-					queryParams.Add(key, fmt.Sprintf("%v", value))
+					queryParams.Add(key, formatScalar(value))
 				} else {
 					// Otherwise, log the warning and ignore.
 					tcLog.Warn("parameter has unsupported or unhandled location in spec; ignoring", "param", key, "location", paramLocation)
