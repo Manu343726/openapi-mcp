@@ -29,6 +29,7 @@ OpenAPI-MCP is a dockerized MCP server that reads OpenAPI/Swagger specifications
     -   [Using the Pre-built Docker Hub Image (Recommended)](#using-the-pre-built-docker-hub-image-recommended)
     -   [Building Locally (Optional)](#building-locally-optional)
 -   [Running the Weatherbit Example (Step-by-Step)](#running-the-weatherbit-example-step-by-step)
+-   [Development notes](#development-notes)
 -   [Command-Line Options](#command-line-options)
     -   [Environment Variables](#environment-variables)
 
@@ -467,6 +468,15 @@ A `docker-compose.yml` file is provided in the `example/` directory to demonstra
     *   The MCP server will be available at `http://localhost:8080`.
 
 3.  **Stop the service:** Press `Ctrl+C` in the terminal where Compose is running, or run `docker-compose down` from the `example` directory in another terminal.
+
+## Development notes
+
+When modifying or extending this codebase, read
+[`docs/development.md`](docs/development.md) first: it collects the known
+quirks and deliberate constraints that are easy to trip over (OpenAPI 3.1
+dependency requirements, tool-name length capping, parameter serialization,
+semantic knowledge-layer semantics, and the MCP protocol wiring for not-yet
+implemented primitives).
 
 ## Command-Line Options
 
