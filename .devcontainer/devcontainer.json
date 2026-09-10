@@ -26,5 +26,10 @@
     8080,
     8099
   ],
-  "remoteUser": "vscode"
+  "remoteUser": "vscode",
+  "mounts": [
+    "source=${localEnv:HOME}${localEnv:USERPROFILE}/.ssh,target=/home/vscode/.ssh-host,type=bind,readonly",
+    "source=${localEnv:HOME}${localEnv:USERPROFILE}/.gitconfig,target=/home/vscode/.gitconfig-host,type=bind,readonly"
+  ],
+  "postCreateCommand": "bash ./.devcontainer/ssh-forward.sh"
 }
