@@ -189,3 +189,42 @@ func TestLoadFileMissingAndInvalid(t *testing.T) {
 	_, err = LoadFile(path)
 	assert.ErrorContains(t, err, "parsing config file")
 }
+
+func TestKnowledgeConfigRoundTrip(t *testing.T) {
+	kc := KnowledgeConfig{
+		Enabled:  true,
+		Language: "es",
+		Root:     "/srv/kb/acme",
+		Backend: KnowledgeBackendConfig{
+			Type:          "git",
+			RepositoryEnv: "F_KB_REPO",
+			Branch:        "dev",
+			Sync:          "auto",
+			Conflict:      "rebase",
+		},
+		Learning: KnowledgeLearningConfig{Enabled: true},
+	}
+	fc := &FileConfig{APIs: []APIDefinition{{Name: "acme", Knowledge: kc}}}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, SaveFile(path, fc))
+	got, err := LoadFile(path)
+	require.NoError(t, err)
+	require.Len(t, got.APIs, 1)
+	assert.Equal(t, kc, got.APIs[0].Knowledge)
+}
+
+func TestResolveKnowledgeBackendEnvPrecedence(t *testing.T) {
+	t.Setenv("KB_TEST_REPO", "https://git.example/kb.git")
+	kc := KnowledgeConfig{
+		Backend: KnowledgeBackendConfig{
+			Type:          "git",
+			Repository:    "literal://x",
+			RepositoryEnv: "KB_TEST_REPO",
+		},
+	}
+	got := kc.ResolveKnowledgeBackend()
+	assert.Equal(t, "https://git.example/kb.git", got.Repository) // env wins
+	assert.Equal(t, "main", got.Branch)
+	assert.Equal(t, "auto", got.Sync)
+	assert.Equal(t, "rebase", got.Conflict)
+}

@@ -52,7 +52,7 @@ const (
 
 // managementTools is the fixed set of management tools appended to every
 // tools/list response.
-var managementTools = buildManagementTools()
+var managementTools = append(buildManagementTools(), buildKnowledgeTools()...)
 
 func managementToolByName(name string) (mcp.Tool, bool) {
 	for _, t := range managementTools {
@@ -454,6 +454,9 @@ type managementToolResult struct {
 // the MCP client. Registry mutations trigger a tools/list_changed broadcast.
 func (r *Registry) runManagementTool(connID, name string, args map[string]interface{}) managementToolResult {
 	var err error
+	if isKnowledgeTool(name) {
+		return r.runKnowledgeTool(connID, name, args)
+	}
 	switch name {
 	case ToolRegisterAPI:
 		var def config.APIDefinition

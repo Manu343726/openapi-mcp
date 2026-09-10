@@ -853,3 +853,53 @@ func TestReloadAPIManagementTool(t *testing.T) {
 	require.False(t, res.ok)
 	assert.Contains(t, res.text, "not registered")
 }
+
+func TestKnowledgeToolsRegistered(t *testing.T) {
+	reg := NewRegistry("")
+	names := toolNames(reg.Tools())
+	for _, want := range []string{
+		ToolKnowledgeInit, ToolKnowledgeLoad, ToolKnowledgeStatus, ToolKnowledgeUpsert,
+		ToolKnowledgeDelete, ToolKnowledgeGet, ToolKnowledgeSearch, ToolKnowledgeClarify,
+		ToolKnowledgeRemember, ToolCapabilities, ToolDiscoverTask, ToolUpdateKnowledge,
+	} {
+		assert.Contains(t, names, want, "missing knowledge tool %q", want)
+	}
+}
+
+func TestKnowledgeOverlaySession(t *testing.T) {
+	reg := NewRegistry("")
+	connID := "conn-1"
+
+	out, err := reg.KnowledgeUpsert(connID, "acme", "---\nid: nota\nkind: glossary\n---\n# Nota\n", "", false)
+	assert.ErrorContains(t, err, "not registered")
+	_ = out
+
+	// Register a minimal API with knowledge enabled.
+	root := t.TempDir()
+	def := config.APIDefinition{
+		Name:      "acme",
+		Source:    "/tmp/opencode/acme-spec.json",
+		Knowledge: config.KnowledgeConfig{Enabled: true, Language: "es", Root: root},
+	}
+	// Spec source is bogus; registration must not be attempted here, so create
+	// the entry directly through the registry snapshot path instead:
+	reg.mu.Lock()
+	reg.apis["acme"] = &apiEntry{Def: def}
+	reg.mu.Unlock()
+
+	_, err = reg.KnowledgeUpsert(connID, "acme", "---\nid: nota\nkind: glossary\nlanguage: es\n---\n# Nota\n\nNota de sesion.\n", "", false)
+	require.NoError(t, err)
+
+	md, err := reg.KnowledgeGet(connID, "acme", "nota")
+	require.NoError(t, err)
+	assert.Contains(t, md, "Nota")
+
+	// Overlay is per connection: another connection does not see it.
+	_, err = reg.KnowledgeGet("conn-2", "acme", "nota")
+	assert.ErrorContains(t, err, "not found")
+
+	// Dropping the session removes the overlay.
+	reg.DropSession(connID)
+	_, err = reg.KnowledgeGet(connID, "acme", "nota")
+	assert.ErrorContains(t, err, "not found")
+}

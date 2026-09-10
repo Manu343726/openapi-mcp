@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ckanthony/openapi-mcp/pkg/config"
+	"github.com/ckanthony/openapi-mcp/pkg/knowledge"
 	"github.com/ckanthony/openapi-mcp/pkg/logx"
 	"github.com/ckanthony/openapi-mcp/pkg/mcp"
 	"github.com/ckanthony/openapi-mcp/pkg/parser"
@@ -65,6 +66,9 @@ type apiEntry struct {
 	ToolSet       *mcp.ToolSet // tools keyed by bare operation names
 	Doc           *mcp.ApiDoc  // normalized spec documentation for introspection
 
+	// Knowledge is the indexed Markdown knowledge library (nil while unloaded).
+	Knowledge *knowledge.Library
+
 	// tokenMu guards loginTokens (per-target login session cache).
 	tokenMu     sync.Mutex
 	loginTokens map[string]*tokenCacheEntry
@@ -113,6 +117,16 @@ type Registry struct {
 	// and is cleared when the session disconnects.
 	sessionTargets map[string]map[string]string
 
+	// sessionKnowledge is the per-connection knowledge overlay: connection ->
+	// api -> document id -> doc. It lets the agent extend knowledge during a
+	// session without touching the persisted manual; it is cleared on
+	// disconnect.
+	sessionKnowledge map[string]map[string]map[string]*knowledge.Doc
+	// sessionTraces records the ordered, successful tool calls of a connection
+	// (only when the owning API has learning enabled), so sequences can be
+	// suggested as capability drafts.
+	sessionTraces map[string][]knowledgeTrace
+
 	// Optional spec watcher (started on demand when an API opts into monitoring).
 	monitorCtx    context.Context
 	monitorCancel context.CancelFunc
@@ -123,10 +137,12 @@ type Registry struct {
 // registrations (APIs, targets, active target selection) are persisted there.
 func NewRegistry(persistPath string) *Registry {
 	r := &Registry{
-		apis:           make(map[string]*apiEntry),
-		index:          make(map[string]*toolRef),
-		persistPath:    persistPath,
-		sessionTargets: make(map[string]map[string]string),
+		apis:             make(map[string]*apiEntry),
+		index:            make(map[string]*toolRef),
+		persistPath:      persistPath,
+		sessionTargets:   make(map[string]map[string]string),
+		sessionKnowledge: make(map[string]map[string]map[string]*knowledge.Doc),
+		sessionTraces:    make(map[string][]knowledgeTrace),
 	}
 	// Seed the snapshot with the management tools so tools/list always surfaces
 	// them, even when no API is registered yet.
@@ -1282,6 +1298,8 @@ func (r *Registry) DropSession(connID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.sessionTargets, connID)
+	delete(r.sessionKnowledge, connID)
+	delete(r.sessionTraces, connID)
 }
 
 // prepareCallArgsFor resolves the target for a call within a session,

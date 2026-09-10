@@ -503,6 +503,12 @@ func dispatchJSONRPC(connID string, req *jsonRPCRequest, reqID interface{}, reg 
 		return resp, false
 	case "notifications/initialized":
 		return jsonRPCResponse{}, true // no response to send
+	case "notifications/cancelled":
+		serverLog.Debug("request cancellation notice", "conn_id", connID, "requestId", notificationParam(req, "requestId"), "reason", notificationParam(req, "reason"))
+		return jsonRPCResponse{}, true
+	case "notifications/progress", "notifications/roots/list_changed", "notifications/resources/list_changed", "notifications/resources/updated", "notifications/prompts/list_changed", "notifications/tools/list_changed":
+		// Standard notifications the client may send that carry no response.
+		return jsonRPCResponse{}, true
 	case "logging/setLevel":
 		return handleLoggingSetLevelJSONRPC(connID, req), false
 	case "tools/list":
@@ -511,7 +517,20 @@ func dispatchJSONRPC(connID string, req *jsonRPCRequest, reqID interface{}, reg 
 		return handleToolCallJSONRPC(connID, req, reg), false
 	case "ping":
 		return jsonRPCResponse{Jsonrpc: "2.0", ID: req.ID, Result: map[string]interface{}{}}, false
+	case "resources/list", "resources/templates/list", "resources/read",
+		"resources/subscribe", "resources/unsubscribe",
+		"prompts/list", "prompts/get", "completion/complete":
+		// Wiring for the standard primitives: implemented in a future iteration.
+		// Reply with a proper "not implemented" error instead of fabricating
+		// empty data or logging the request as an unknown method.
+		return rpcNotImplemented(req), false
 	default:
+		// Anything under "notifications/" is fire-and-forget per JSON-RPC; accept
+		// unknown notifications silently instead of returning "method not found".
+		if strings.HasPrefix(req.Method, "notifications/") {
+			serverLog.Debug("ignoring unrecognized notification", "method", req.Method, "conn_id", connID)
+			return jsonRPCResponse{}, true
+		}
 		serverLog.Warn("unknown JSON-RPC method", "method", req.Method, "conn_id", connID)
 		return createJSONRPCError(reqID, -32601, fmt.Sprintf("Method not found: %s", req.Method), nil), false
 	}
@@ -670,6 +689,38 @@ func handleLoggingSetLevelJSONRPC(connID string, req *jsonRPCRequest) jsonRPCRes
 		ID:      req.ID,
 		Result:  map[string]interface{}{},
 	}
+}
+
+// rpcResult builds a successful JSON-RPC response carrying a result payload.
+func rpcResult(req *jsonRPCRequest, result map[string]interface{}) jsonRPCResponse {
+	return jsonRPCResponse{Jsonrpc: "2.0", ID: req.ID, Result: result}
+}
+
+// rpcNotImplemented answers a standard MCP request whose feature is not
+// implemented yet with a real JSON-RPC error, so clients get an honest failure
+// (rather than fabricated empty data) without the request being logged as an
+// unknown method.
+func rpcNotImplemented(req *jsonRPCRequest) jsonRPCResponse {
+	serverLog.Debug("standard MCP method not implemented yet", "method", req.Method)
+	return createJSONRPCError(req.ID, -32001, fmt.Sprintf("Method not implemented: %s", req.Method), nil)
+}
+
+// notificationParam reads a named field from a notification's params object,
+// tolerating both decoded maps and raw JSON.
+func notificationParam(req *jsonRPCRequest, key string) interface{} {
+	if req == nil || req.Params == nil {
+		return nil
+	}
+	if m, ok := req.Params.(map[string]interface{}); ok {
+		return m[key]
+	}
+	if raw, ok := req.Params.(json.RawMessage); ok {
+		var m map[string]interface{}
+		if json.Unmarshal(raw, &m) == nil {
+			return m[key]
+		}
+	}
+	return nil
 }
 
 // paramsMap returns a request's params as a map, tolerating both the
@@ -1102,6 +1153,11 @@ func handleToolCallJSONRPC(connID string, req *jsonRPCRequest, reg *Registry) js
 		resultPayload = toolResultPayload(params.ToolName, req.ID, res.ok, text)
 	} else {
 		httpResp, execErr := executeRegisteredTool(reg, connID, &params)
+		if execErr == nil {
+			if entry, _, ok := reg.ResolveTool(params.ToolName); ok {
+				reg.RecordTrace(connID, entry.Def.Name, params.ToolName, cloneArgs(params.Input))
+			}
+		}
 		resultPayload = toolResultFromHTTP(params.ToolName, req.ID, httpResp, execErr)
 	}
 

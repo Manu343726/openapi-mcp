@@ -228,6 +228,124 @@ func (m MonitorConfig) IsConfigured() bool {
 	return m.Enabled || m.AutoReload
 }
 
+// KnowledgeConfig configures the API's semantic knowledge base: a library of
+// Markdown documents (glossary, endpoint/schema/field annotations and
+// high-level "capability" tasks). The library doubles as a human manual and is
+// indexed by the server to power knowledge_* tools, capabilities discovery and
+// (later) high-level task execution.
+//
+// Values that come from the host environment use the X_env pattern and take
+// precedence over their literal counterparts (same rule as api_key_env /
+// login_*_env). Credentials are never stored literally.
+type KnowledgeConfig struct {
+	// Enabled turns the knowledge layer on for this API. While disabled,
+	// knowledge_* tools report it as disabled.
+	Enabled bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+
+	// Language is the language of the knowledge base (e.g. "es", "en"). All
+	// documents are assumed to be written in this language; it drives skeleton
+	// generation (knowledge_init) and search normalization.
+	Language string `json:"language,omitempty" yaml:"language,omitempty"`
+
+	// Root is the local directory of the knowledge library. For a local backend
+	// this is the manual itself; for a git backend it is the checkout managed by
+	// the server. Empty means the platform default
+	// (<configDir>/knowledge/<api>).
+	Root string `json:"root,omitempty" yaml:"root,omitempty"`
+
+	// Backend selects where/how the library is stored and kept in sync.
+	Backend KnowledgeBackendConfig `json:"backend,omitempty" yaml:"backend,omitempty"`
+
+	// Learning opts into recording successful tool calls per session so
+	// sequences can be suggested as capability drafts (never persisted without
+	// explicit confirmation).
+	Learning KnowledgeLearningConfig `json:"learning,omitempty" yaml:"learning,omitempty"`
+}
+
+// KnowledgeBackendConfig describes how the knowledge library is stored.
+type KnowledgeBackendConfig struct {
+	// Type is "local" (default) or "git" (remote repo synced by the server).
+	Type string `json:"type,omitempty" yaml:"type,omitempty"`
+
+	// Repository is the git URL (literal) or RepositoryEnv holds the name of an
+	// environment variable with the URL. Required when Type == "git".
+	Repository    string `json:"repository,omitempty" yaml:"repository,omitempty"`
+	RepositoryEnv string `json:"repository_env,omitempty" yaml:"repository_env,omitempty"`
+
+	// Branch checked out (default "main"), literal or via BranchEnv.
+	Branch    string `json:"branch,omitempty" yaml:"branch,omitempty"`
+	BranchEnv string `json:"branch_env,omitempty" yaml:"branch_env,omitempty"`
+
+	// AuthTokenEnv is an environment variable holding an https token for git
+	// operations; SSHKeyEnv is an environment variable pointing at a private key
+	// path for ssh remotes. Credentials are only ever read from the host env.
+	AuthTokenEnv string `json:"auth_token_env,omitempty" yaml:"auth_token_env,omitempty"`
+	SSHKeyEnv    string `json:"ssh_key_env,omitempty" yaml:"ssh_key_env,omitempty"`
+
+	// Sync is "auto" (pull before load, push after edits — default) or "manual"
+	// (only via knowledge_sync).
+	Sync string `json:"sync,omitempty" yaml:"sync,omitempty"`
+	// Conflict is the divergence policy on pull/push: "rebase" (default) or
+	// "ff_only".
+	Conflict string `json:"conflict,omitempty" yaml:"conflict,omitempty"`
+
+	// Commit identity for git knowledge edits, resolved from env vars.
+	AuthorNameEnv  string `json:"author_name_env,omitempty" yaml:"author_name_env,omitempty"`
+	AuthorEmailEnv string `json:"author_email_env,omitempty" yaml:"author_email_env,omitempty"`
+}
+
+// KnowledgeLearningConfig controls in-session learning features.
+type KnowledgeLearningConfig struct {
+	// Enabled records successful tool calls per connection so capability drafts
+	// can be suggested; nothing is persisted without explicit confirmation.
+	Enabled bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+}
+
+// ResolveKnowledgeBackend returns a copy of the backend config with literal
+// fields filled from their *_env counterparts where the env var is set.
+func (k *KnowledgeConfig) ResolveKnowledgeBackend() KnowledgeBackendConfig {
+	b := k.Backend
+	if b.RepositoryEnv != "" {
+		if v := os.Getenv(b.RepositoryEnv); v != "" {
+			b.Repository = v
+		}
+	}
+	if b.BranchEnv != "" {
+		if v := os.Getenv(b.BranchEnv); v != "" {
+			b.Branch = v
+		}
+	}
+	if b.Type == "" {
+		b.Type = "local"
+	}
+	if b.Sync == "" {
+		b.Sync = "auto"
+	}
+	if b.Conflict == "" {
+		b.Conflict = "rebase"
+	}
+	if b.Branch == "" {
+		b.Branch = "main"
+	}
+	return b
+}
+
+// GitAuth returns the resolved auth material for a git backend, preferring the
+// environment. safe is a flag to let callers know a value is non-empty without
+// exposing it.
+func (k *KnowledgeConfig) GitAuth() (authToken, sshKey string) {
+	authToken = os.Getenv(k.Backend.AuthTokenEnv)
+	sshKey = os.Getenv(k.Backend.SSHKeyEnv)
+	return authToken, sshKey
+}
+
+// GitIdentity returns author name/email for knowledge commits.
+func (k *KnowledgeConfig) GitIdentity() (name, email string) {
+	name = os.Getenv(k.Backend.AuthorNameEnv)
+	email = os.Getenv(k.Backend.AuthorEmailEnv)
+	return name, email
+}
+
 // APIDefinition describes an OpenAPI-backed API registered with the MCP server.
 // It is the canonical description shared between:
 //   - the startup config file (loaded via --config),
@@ -259,6 +377,11 @@ type APIDefinition struct {
 	// Monitoring optionally watches this API's spec source for changes and, when
 	// configured, notifies clients / auto-reloads (see MonitorConfig).
 	Monitoring MonitorConfig `json:"monitoring,omitempty" yaml:"monitoring,omitempty"`
+
+	// Knowledge configures the API's semantic knowledge base (see
+	// KnowledgeConfig). When enabled, the server indexes the Markdown library
+	// and exposes knowledge_* tools to extend and query it during a session.
+	Knowledge KnowledgeConfig `json:"knowledge,omitempty" yaml:"knowledge,omitempty"`
 
 	// IncludeTags/ExcludeTags/IncludeOps/ExcludeOps filter which spec operations
 	// are exposed (same semantics as the --include-* / --exclude-* CLI flags).

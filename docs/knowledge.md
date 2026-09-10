@@ -1,6 +1,16 @@
 # Plan — Semantic Knowledge Base (Markdown) for OpenAPI-MCP
 
-> Status: design approved, awaiting instructions to implement in phases.
+> Status: **in implementation**. Phase 1 (Markdown KB, per-connection overlay, knowledge
+> tools, capabilities/discover_task, hot config) and Phase 3 (run_task dry-run/ask/auto,
+> knowledge_review) are implemented and deployed. The git backend and persistent learning
+> are explicitly omitted for now; the storage backend stays `local`.
+>
+> Implemented code outline: `pkg/config` (`KnowledgeConfig`), `pkg/knowledge` (model, store,
+> links, search, templates, local backend), `pkg/server` (`knowledge.go`, `knowledge_tools.go`,
+> `tasks.go`). The server also answers standard MCP notifications silently (e.g.
+> `notifications/cancelled`) and replies "Method not implemented" (-32001) for the `resources/*`,
+> `prompts/*` and `completion/complete` primitives instead of logging unknown-method warnings
+> (wiring in `pkg/server/server.go` `dispatchJSONRPC`).
 
 ## Goal
 
