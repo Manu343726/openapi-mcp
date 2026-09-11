@@ -159,3 +159,34 @@ func TestExecutorHTTPRedirectBlocked(t *testing.T) {
 		t.Fatal("expected redirect to be blocked")
 	}
 }
+
+func TestExecutorCacheBounded(t *testing.T) {
+	e := NewExecutor(Options{CacheSize: 2})
+	ctx := context.Background()
+	runOne := func(src string) {
+		t.Helper()
+		if _, err := e.Run(ctx, src, nil, Host{}); err != nil {
+			t.Fatalf("run %q: %v", src, err)
+		}
+	}
+	runOne(`return "a"`)
+	runOne(`return "b"`)
+	e.mu.Lock()
+	got := len(e.cache)
+	e.mu.Unlock()
+	if got != 2 {
+		t.Fatalf("cache len = %d, want 2", got)
+	}
+	runOne(`return "c"`)
+	e.mu.Lock()
+	got = len(e.cache)
+	e.mu.Unlock()
+	if got != 2 {
+		t.Fatalf("cache len = %d, want 2 after eviction", got)
+	}
+	// The least-recently-used program was evicted; re-running it recompiles.
+	out, err := e.Run(ctx, `return "a"`, nil, Host{})
+	if err != nil || out != "a" {
+		t.Fatalf("re-run evicted program: %q %v", out, err)
+	}
+}

@@ -2,11 +2,12 @@
 
 > Status: **specification**, with **Phase 1 (meta knowledge base) implemented and
 > tested**, **Phase 2 (dynamic exposure / runtime tool footprint) implemented and
-> tested**, **Phase 3 (scripting core, tengo) implemented and tested**, and
+> tested**, **Phase 3 (scripting core, tengo) implemented and tested**, **Phase 4
+> (scripting hardening) implemented and tested**, and
 > **Phase 7's `view`/`dashboard` model + `view` tool + `run_task`
 > auto-display implemented and tested** (see §2, §3, §4.6, §7, and the
 > "Implementation
-> progress" section at the end); Phase 4+ planned below. This document is the
+> progress" section at the end); Phase 5+ planned below. This document is the
 > detailed
 > development guide for four coordinated features on top of the per-API semantic
 > knowledge base (`docs/knowledge.md`, implemented):
@@ -1150,6 +1151,28 @@ Tracked against §6. Each item links the working changes that shipped it.
     (breakpoints at the handler branch, `RunScript`, the `mcpCall` bridge and
     result normalization; the 10s budget correctly fires when debug pauses
     consume it).
+- **Phase 4 — Scripting hardening**: implemented:
+  - `pkg/script`: the compile cache is now an LRU bounded by
+    `Options.CacheSize` (default `DefaultCacheEntries = 64`), so a long-lived
+    process cannot grow it without bound; `TestExecutorCacheBounded` pins the
+    eviction + recompile behavior.
+  - `script_list`/`script_describe` now report `timeout_s` and `intents` (plus
+    permissions/params/tags/exposed as before) via `scriptView`.
+  - Discovery hints: `Registry.MatchingScripts` scores registered scripts
+    (per-API + `_meta`) against a free-text query by id/intents/summary/tags, and
+    `knowledge_search`, `discover_task` and `knowledge_clarify` surface a
+    `related_scripts` / `scripts` list so an agent reuses a script instead of
+    re-deriving the steps.
+  - `knowledge_promote_script`: turns a draft capability (created by
+    `knowledge_remember_sequence` from a recorded session sequence) into a
+    `kind: script` doc under `scripts/<id>.tengo` that replays its steps via
+    `mcp.call`; preview with `confirm=false`, write with `confirm=true`, then it
+    re-indexes and the script becomes a tool. `generateScriptFromCapability`
+    maps `param.*` bindings to the injected `params` map and `step.N.*` bindings
+    to the previous call's result.
+  - Tests: `TestScriptViewSurfacesTimeoutAndIntents`,
+    `TestScriptDiscoveryHints`, `TestScriptRunFoldsIntoCapabilityDraft`,
+    `TestPromoteSequenceToScript` (+ the cache test above).
 
 ### In progress / next
 
@@ -1157,38 +1180,36 @@ Tracked against §6. Each item links the working changes that shipped it.
   stream (needs the Phase 5/6 web-session bridge for delivery), dashboard
   auto-display surfaced through `/ui`, and the front-end serializer + input
   controls re-issuing backing calls.
-- Phase 4 — Scripting hardening: compiled-program eviction/bounding, the
-  per-script `timeout` guard surfaced in `script_list`, `mcp.resolve`-driven
-  script discovery hints, tracing→capability folding of script runs, and
-  `script_*` create/update/promote tooling; then Phases 5–6 (web UI shell,
-  generative UI) as planned in §6.
+- Phase 5 — Web UI shell (CopilotKit) and Phase 6 — generative UI, as planned in
+  §6/§4: the per-session isolation, manifest-driven exposure surface, session
+  mirror and view/dashboard rendering are already in place, so the remaining work
+  is the front-end shell that consumes them.
+
 ### Resume here (next working session)
 
-**Status:** Phase 1 (meta KB), Phase 7 model/view tools, Phase 2 (dynamic
-exposure) and Phase 3 (scripting core) are implemented, tested and committed to
-`main` (§8 above). `pkg/script`, `pkg/knowledge/script.go`,
-`pkg/server/scripts.go`, `pkg/server/exposure_test.go`,
-`pkg/server/scripts_test.go` and `pkg/knowledge/script_test.go` are the main new
-files.
+**Status:** Phases 1 (meta KB), 2 (dynamic exposure), 3 (scripting core) and 4
+(scripting hardening) are implemented, tested and committed to `main`; the Phase 7
+view/dashboard model is done pending the Phase 5/6 UI bridge (§8 above).
+`pkg/script` (`executor.go`/`modules.go`), `pkg/knowledge/script.go`,
+`pkg/server/scripts.go` and their `_test.go` files are the main additions.
 
-**Next up: Phase 4 — Scripting hardening (§2.3–§2.5, §6).** Suggested order:
+**Next up: Phase 5 — Web UI shell (§4).** Suggested order:
 
-1. Bound the compile cache (`Executor.cache`) with an LRU/size cap; today it is
-   partitioned per `(sourceHash, host.Key)` and grows unbounded.
-2. Surface the per-script `timeout` and declared permissions in `script_list`,
-   and add a `related script exists` hint from `knowledge_search`/`discover_task`
-   when an intent matches a script's `intents`.
-3. Fold successful script runs into capability drafts (the `RecordTrace` hook is
-   already wired for scripts in `runKnowledgeTool`/`run_task`).
-4. Optional tooling: `knowledge_promote`-style promotion of a session sequence
-   into a `scripts/` doc (the `ScriptSkeleton` template exists).
+1. Stand up the CopilotKit shell that talks to the streamable-HTTP MCP and the
+   session mirror; reuse `pkg/server`'s `view`/`dashboard` renders.
+2. Wire per-session isolation (`X-Connection-ID` / `sessionId`) end-to-end so
+   `update_session_api_exposure` and session-active targets work from the UI — note
+   that stateless streamable HTTP currently yields `connID=""`, so session-scoped
+   tools need the legacy SSE connection id (or a new session header) plumbed.
+3. Surface `api_exposure` (which now includes scripts) as the UI's tool-footprint
+   control, and the script tools/`script_list` as first-class actions.
 
-**Working notes (Phase 3 was developed here):**
+**Working notes (Phase 3/4 were developed here):**
 
 - `pkg/script` is intentionally independent of `pkg/server`/`pkg/knowledge`:
   callers inject the host bridge through `script.Host` at run time, and the
-  compile cache is partitioned by `Host.Key` (the session id) so a script that
-  uses `mcp` never shares compiled bytecode across sessions.
+  compile cache is an LRU partitioned by `(sourceHash, Host.Key)` (the session
+  id) so a script that uses `mcp` never shares compiled bytecode across sessions.
 - Scripts are resolved through `Registry.scriptToolFor` (not `ResolveTool`,
   which stays operation-only) and dispatched by `Registry.RunScript`; the
   per-session exposure gate uses the synthetic `script` tag (`scriptTag`).

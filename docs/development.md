@@ -218,7 +218,9 @@ These are deliberate constraints — the tests and behavior rely on them.
 - **Guards**: each run has a wall-clock budget (default 10s via
   `meta.scripting.default_timeout_s`, overridable per doc with `timeout:`) and a
   tengo `SetMaxAllocs` allocation cap. The source is wrapped in an IIFE so a
-  top-level `return` is valid.
+  top-level `return` is valid. Compiled programs are cached in an LRU bounded by
+  `script.Options.CacheSize` (default 64) and keyed by
+  `(sourceHash, host.Key)`.
 - **Dispatch**: scripts are deliberately *not* in the operation index
   (`ResolveTool` stays operation-only). They live in `Registry.scriptTools` and
   are resolved with `scriptToolFor`; `RunScript` runs them, `CallTool` is the
@@ -226,7 +228,13 @@ These are deliberate constraints — the tests and behavior rely on them.
   Never re-derive script names by string surgery.
 - **Exposure**: per-API scripts follow the owning API's runtime exposure, bucketed
   under the synthetic `script` tag; `_meta__*` scripts are always exposed. The
-  `script_list`/`script_describe` tools inspect them.
+  `script_list`/`script_describe` tools inspect them (id, permissions, params,
+  timeout, intents, exposed); `api_exposure`/`list_openapi_apis` count them too.
+- **Write-it-once loop**: `knowledge_remember_sequence` folds recorded calls into
+  a draft capability; `knowledge_promote_script` turns that draft into a
+  `scripts/<id>.tengo` that replays the steps via `mcp.call` (preview with
+  `confirm=false`, write with `confirm=true`). `knowledge_search`/`discover_task`/
+  `knowledge_clarify` surface related scripts by id/intents/summary/tags.
 
 ## MCP protocol (`pkg/server/server.go` `dispatchJSONRPC`)
 

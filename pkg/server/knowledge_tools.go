@@ -33,6 +33,7 @@ const (
 	ToolView                 = "view"
 	ToolScriptList           = "script_list"
 	ToolScriptDescribe       = "script_describe"
+	ToolPromoteScript        = "knowledge_promote_script"
 )
 
 // knowledgeToolNames is the set of knowledge management tools.
@@ -47,6 +48,7 @@ var knowledgeToolNames = map[string]bool{
 	ToolUpdateMetaKnowledge: true,
 	ToolView:                true,
 	ToolScriptList:          true, ToolScriptDescribe: true,
+	ToolPromoteScript: true,
 }
 
 func isKnowledgeTool(name string) bool { return knowledgeToolNames[name] }
@@ -319,7 +321,7 @@ func buildKnowledgeTools() []mcp.Tool {
 		},
 		{
 			Name:        ToolScriptList,
-			Description: "List the registered kind: script tools (executable tengo knowledge docs surfaced as MCP tools). Optionally scope to one API; pass api=\"_meta\" for the global scripts. Reports each script's fully qualified tool name, permissions, parameters and whether it is currently exposed.",
+			Description: "List the registered kind: script tools (executable tengo knowledge docs surfaced as MCP tools). Optionally scope to one API; pass api=\"_meta\" for the global scripts. Reports each script's fully qualified tool name, permissions, parameters, run timeout and whether it is currently exposed.",
 			InputSchema: mcp.Schema{
 				Type: "object",
 				Properties: map[string]mcp.Schema{
@@ -337,6 +339,20 @@ func buildKnowledgeTools() []mcp.Tool {
 					"script": {Type: "string", Description: "Fully qualified tool name (e.g. _meta__free_disk_space) or script id"},
 				},
 				Required: []string{"script"},
+			},
+		},
+		{
+			Name:        ToolPromoteScript,
+			Description: "Promote a draft capability (e.g. one created from a recorded session sequence with knowledge_remember_sequence) into a reusable kind: script tool: generates a tengo script that replays its steps through the mcp module and writes it under scripts/<id>.tengo, then re-indexes. Preview with confirm=false (default), write with confirm=true.",
+			InputSchema: mcp.Schema{
+				Type: "object",
+				Properties: map[string]mcp.Schema{
+					"api":     {Type: "string", Description: "Name of the registered API"},
+					"draft":   {Type: "string", Description: "Draft capability id (or path) to promote"},
+					"script":  {Type: "string", Description: "Script id to create (defaults to the draft id)"},
+					"confirm": {Type: "boolean", Description: "Write the script instead of previewing (default false)"},
+				},
+				Required: []string{"api", "draft"},
 			},
 		},
 	}
@@ -579,6 +595,12 @@ func (r *Registry) runKnowledgeTool(connID, name string, args map[string]interfa
 		return okResult(out)
 	case ToolScriptDescribe:
 		out, err := r.DescribeScript(strArg(args, "api"), strArg(args, "script"))
+		if err != nil {
+			return errResult(err)
+		}
+		return okResult(out)
+	case ToolPromoteScript:
+		out, err := r.PromoteScript(connID, strArg(args, "api"), strArg(args, "draft"), strArg(args, "script"), boolArg(args, "confirm"))
 		if err != nil {
 			return errResult(err)
 		}

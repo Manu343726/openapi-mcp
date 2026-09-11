@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -287,6 +289,8 @@ type scriptView struct {
 	Permissions []string `json:"permissions,omitempty"`
 	Params      []string `json:"params,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
+	Intents     []string `json:"intents,omitempty"`
+	TimeoutS    int      `json:"timeout_s,omitempty"`
 	Source      string   `json:"source,omitempty"`
 	Exposed     bool     `json:"exposed"`
 }
@@ -355,7 +359,262 @@ func (r *Registry) scriptViewLocked(ref *scriptRef, fullName, source string) scr
 		Permissions: ref.doc.Permissions,
 		Params:      ref.doc.ParamNames(),
 		Tags:        ref.doc.Tags,
+		Intents:     ref.doc.Intents,
+		TimeoutS:    int(ref.exec.Timeout().Seconds()),
 		Source:      source,
 		Exposed:     r.scriptExposedLocked(ref, ""),
 	}
+}
+
+// MatchingScripts returns the registered script tools relevant to a free-text
+// query, best first. Relevance is a token match against the script id, intents,
+// summary and tags; global (_meta) scripts are always considered, alongside the
+// given API's. It powers the "a related script exists" hints in the discovery
+// tools so an agent reuses a script instead of re-deriving the steps.
+func (r *Registry) MatchingScripts(connID, apiName, query string, limit int) []map[string]interface{} {
+	tokens := queryTokens(query)
+	if len(tokens) == 0 {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	type hit struct {
+		score int
+		name  string
+		view  map[string]interface{}
+	}
+	r.mu.RLock()
+	hits := make([]hit, 0, len(r.scriptTools))
+	for name, ref := range r.scriptTools {
+		if ref.scope != apiName && !ref.meta {
+			continue
+		}
+		score := scriptMatchScore(ref.doc, tokens)
+		if score == 0 {
+			continue
+		}
+		hits = append(hits, hit{score: score, name: name, view: map[string]interface{}{
+			"name":    name,
+			"id":      ref.doc.ID,
+			"api":     ref.scope,
+			"summary": ref.doc.Summary,
+			"intents": ref.doc.Intents,
+			"exposed": r.scriptExposedLocked(ref, connID),
+		}})
+	}
+	r.mu.RUnlock()
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].score != hits[j].score {
+			return hits[i].score > hits[j].score
+		}
+		return hits[i].name < hits[j].name
+	})
+	if len(hits) > limit {
+		hits = hits[:limit]
+	}
+	out := make([]map[string]interface{}, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, h.view)
+	}
+	return out
+}
+
+// queryTokens splits a free-text query into lower-cased alphanumeric tokens of
+// at least two characters (single letters like "a" would match almost anything
+// and only add noise).
+func queryTokens(query string) []string {
+	query = strings.ToLower(query)
+	raw := strings.FieldsFunc(query, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
+	})
+	out := raw[:0]
+	for _, t := range raw {
+		if len(t) >= 2 {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// scriptMatchScore scores a script doc against query tokens: id/intent hits
+// weigh more than summary/tag hits.
+func scriptMatchScore(doc *knowledge.Doc, tokens []string) int {
+	id := strings.ToLower(doc.ID)
+	summary := strings.ToLower(doc.Summary)
+	score := 0
+	for _, tok := range tokens {
+		if tok == "" {
+			continue
+		}
+		if strings.Contains(id, tok) {
+			score += 3
+		}
+		for _, in := range doc.Intents {
+			if strings.Contains(strings.ToLower(in), tok) {
+				score += 3
+				break
+			}
+		}
+		if strings.Contains(summary, tok) {
+			score += 1
+		}
+		for _, t := range doc.Tags {
+			if strings.Contains(strings.ToLower(t), tok) {
+				score += 1
+				break
+			}
+		}
+	}
+	return score
+}
+
+// PromoteScript turns a draft capability (typically created by
+// knowledge_remember_sequence from recorded calls) into a kind: script document
+// that replays its steps through the mcp host module. It is the "promote to a
+// scripts/ doc" step of the write-it-once directive. Pass confirm=false to
+// preview the target without writing.
+func (r *Registry) PromoteScript(connID, apiName, draft, scriptID string, confirm bool) (string, error) {
+	entry, err := r.apiEntryFor(apiName)
+	if err != nil {
+		return "", err
+	}
+	if !entry.Def.Knowledge.Enabled {
+		return "", fmt.Errorf("API %q has knowledge disabled", apiName)
+	}
+	doc, found := r.findSuggestion(entry, connID, draft)
+	if !found {
+		return "", fmt.Errorf("no draft capability %q found; create one with knowledge_remember_sequence, then promote it", draft)
+	}
+	if len(doc.Steps) == 0 {
+		return "", fmt.Errorf("draft %q has no steps to promote into a script", doc.ID)
+	}
+	if scriptID == "" {
+		scriptID = doc.ID
+	}
+	if !validDocID(scriptID) {
+		return "", fmt.Errorf("invalid script id %q (use letters, digits, '-' or '_')", scriptID)
+	}
+	if !confirm {
+		return fmt.Sprintf("Draft %q (%d step(s)) would become script tool %q at scripts/%s.tengo with permissions [mcp]. Pass confirm=true to write it.",
+			doc.ID, len(doc.Steps), toolFullName(apiName, scriptID), scriptID), nil
+	}
+	backend, err := r.backendFor(entry)
+	if err != nil {
+		return "", err
+	}
+	src := generateScriptFromCapability(doc, apiName, scriptID)
+	rel := "scripts/" + scriptID + ".tengo"
+	if err := backend.WriteFile(rel, []byte(src)); err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(doc.Path, "_suggestions/") {
+		if err := backend.DeleteFile(doc.Path); err != nil && !os.IsNotExist(err) {
+			return "", err
+		}
+	}
+	r.overlayRemove(connID, apiName, doc.ID)
+	if _, err := r.LoadKnowledge(apiName); err != nil {
+		return "", err
+	}
+	msg := fmt.Sprintf("Promoted draft %q to script tool %q (%s) and re-indexed.", doc.ID, toolFullName(apiName, scriptID), rel)
+	return pushAfterEdit(backend, msg)
+}
+
+// generateScriptFromCapability renders a tengo script that replays a capability
+// draft's steps via the mcp host module. Param bindings read the injected
+// "params" map; step-output bindings reuse the previous call's whole result.
+func generateScriptFromCapability(cap *knowledge.Doc, scope, id string) string {
+	var b strings.Builder
+	summary := cap.Title
+	if summary == "" {
+		summary = cap.Summary
+	}
+	if summary == "" {
+		summary = id
+	}
+	// Collect the params referenced by the steps (deduped, sorted).
+	req := map[string]bool{}
+	for _, p := range cap.Params {
+		req[p.Name] = p.Required
+	}
+	seen := map[string]bool{}
+	var paramNames []string
+	for _, st := range cap.Steps {
+		for _, in := range st.Inputs {
+			from := strings.TrimSpace(in.From)
+			if strings.HasPrefix(from, "param.") {
+				if n := strings.TrimPrefix(from, "param."); n != "" && !seen[n] {
+					seen[n] = true
+					paramNames = append(paramNames, n)
+				}
+			}
+		}
+	}
+	sort.Strings(paramNames)
+
+	b.WriteString("// ---\n")
+	b.WriteString("// kind: script\n")
+	fmt.Fprintf(&b, "// id: %s\n", id)
+	fmt.Fprintf(&b, "// summary: %s\n", strconv.Quote(summary))
+	b.WriteString("// permissions: [mcp]\n")
+	if len(paramNames) > 0 {
+		b.WriteString("// params:\n")
+		for _, n := range paramNames {
+			fmt.Fprintf(&b, "//   - {name: %s, required: %t}\n", n, req[n])
+		}
+	}
+	b.WriteString("// ---\n")
+	b.WriteString("m := import(\"mcp\")\n")
+
+	last := ""
+	for i, st := range cap.Steps {
+		call := normalizeToolName(scope, st.Tool)
+		argsVar := fmt.Sprintf("args%d", i+1)
+		resVar := fmt.Sprintf("r%d", i+1)
+		fmt.Fprintf(&b, "%s := {}\n", argsVar)
+		keys := make([]string, 0, len(st.Inputs))
+		for k := range st.Inputs {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			expr, ok := bindingExpr(st.Inputs[k].From)
+			if !ok {
+				continue
+			}
+			fmt.Fprintf(&b, "%s[%s] = %s\n", argsVar, strconv.Quote(k), expr)
+		}
+		fmt.Fprintf(&b, "%s := m.call(%q, %s)\n", resVar, call, argsVar)
+		last = resVar
+	}
+	if last == "" {
+		b.WriteString("return \"\"\n")
+	} else {
+		fmt.Fprintf(&b, "return %s\n", last)
+	}
+	return b.String()
+}
+
+// bindingExpr translates a capability input binding into a tengo expression.
+func bindingExpr(from string) (string, bool) {
+	from = strings.TrimSpace(from)
+	switch {
+	case strings.HasPrefix(from, "param."):
+		name := strings.TrimPrefix(from, "param.")
+		if name == "" {
+			return "", false
+		}
+		return "params[" + strconv.Quote(name) + "]", true
+	case strings.HasPrefix(from, "step."):
+		ref := strings.TrimPrefix(from, "step.")
+		if dot := strings.IndexByte(ref, '.'); dot > 0 {
+			ref = ref[:dot]
+		}
+		if ref == "" {
+			return "", false
+		}
+		return "r" + ref, true
+	}
+	return "", false
 }

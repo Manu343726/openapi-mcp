@@ -19,6 +19,7 @@
 package script
 
 import (
+	"container/list"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -49,6 +50,8 @@ const resultVar = "__mcp_script_result__"
 const (
 	DefaultTimeout   = 10 * time.Second
 	DefaultMaxAllocs = 1 << 20 // ~1M object allocations
+	// DefaultCacheEntries bounds the compiled-program cache per executor.
+	DefaultCacheEntries = 64
 )
 
 // safeStdlibModules are the pure tengo standard-library modules always imported.
@@ -98,6 +101,9 @@ type Options struct {
 	// MaxAllocs is the tengo allocation guard (default DefaultMaxAllocs). It is
 	// the executor's runaway-loop/step guard, alongside Timeout.
 	MaxAllocs int64
+	// CacheSize bounds the compiled-program cache (default DefaultCacheEntries).
+	// The least-recently-used program is evicted when the bound is exceeded.
+	CacheSize int
 	// ExecAllowlist is the set of command names exec.run may execute.
 	ExecAllowlist []string
 	// FSReadRoots are the directory prefixes fs may read from ("" = none).
@@ -107,13 +113,21 @@ type Options struct {
 	HTTPAllowlist []string
 }
 
+// compiledEntry is one cached tengo program plus its cache key.
+type compiledEntry struct {
+	key  string
+	prog *tengo.Compiled
+}
+
 // Executor runs scripts with a fixed permission set and host bridge. It caches
-// compiled bytecode per (source hash, host key). Executors are safe for
-// concurrent use.
+// compiled bytecode per (source hash, host key) in an LRU bounded by
+// Options.CacheSize. Executors are safe for concurrent use.
 type Executor struct {
-	opts  Options
-	mu    sync.Mutex
-	cache map[string]*tengo.Compiled
+	opts       Options
+	mu         sync.Mutex
+	cache      map[string]*list.Element // key -> element holding *compiledEntry
+	order      *list.List               // front = most recently used
+	maxEntries int
 }
 
 // NewExecutor builds an executor from opts, filling defaults.
@@ -124,7 +138,15 @@ func NewExecutor(opts Options) *Executor {
 	if opts.MaxAllocs <= 0 {
 		opts.MaxAllocs = DefaultMaxAllocs
 	}
-	return &Executor{opts: opts, cache: map[string]*tengo.Compiled{}}
+	if opts.CacheSize <= 0 {
+		opts.CacheSize = DefaultCacheEntries
+	}
+	return &Executor{
+		opts:       opts,
+		cache:      map[string]*list.Element{},
+		order:      list.New(),
+		maxEntries: opts.CacheSize,
+	}
 }
 
 // Permissions returns the executor's declared permissions (defensive copy).
@@ -178,8 +200,9 @@ func (e *Executor) compile(src string, host Host) (*tengo.Compiled, error) {
 	key := sourceHash(src) + "\x00" + host.Key
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if c, ok := e.cache[key]; ok {
-		return c, nil
+	if el, ok := e.cache[key]; ok {
+		e.order.MoveToFront(el)
+		return el.Value.(*compiledEntry).prog, nil
 	}
 	s := tengo.NewScript([]byte(wrapSource(src)))
 	s.SetImports(e.buildModules(host))
@@ -201,7 +224,16 @@ func (e *Executor) compile(src string, host Host) (*tengo.Compiled, error) {
 	if err != nil {
 		return nil, err
 	}
-	e.cache[key] = c
+	el := e.order.PushFront(&compiledEntry{key: key, prog: c})
+	e.cache[key] = el
+	for len(e.cache) > e.maxEntries {
+		back := e.order.Back()
+		if back == nil {
+			break
+		}
+		e.order.Remove(back)
+		delete(e.cache, back.Value.(*compiledEntry).key)
+	}
 	return c, nil
 }
 

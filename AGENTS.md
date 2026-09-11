@@ -26,10 +26,10 @@ Before modifying, testing, or extending this project, read:
 ## Development plan
 
 Work follows the phases in `docs/feature-spec-meta-scripting-ui.md` §6. As of the
-last commit: Phases 1 (meta KB), 2 (dynamic exposure), 3 (tengo scripting core)
-and the Phase 7 view/dashboard model are **done**; **Phase 4 (scripting
-hardening)** is next. Prefer continuing the plan (and updating that section) over
-starting unrelated features.
+last commit: Phases 1 (meta KB), 2 (dynamic exposure), 3 (tengo scripting core),
+4 (scripting hardening) and the Phase 7 view/dashboard model are **done**;
+**Phase 5 (web UI shell)** is next. Prefer continuing the plan (and updating that
+section) over starting unrelated features.
 
 ## Project at a glance
 

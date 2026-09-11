@@ -931,11 +931,16 @@ func (r *Registry) KnowledgeSearch(connID, apiName, query string, limit int) (st
 			"score":    h.Score,
 		})
 	}
-	body, _ := json.MarshalIndent(map[string]interface{}{
+	resp := map[string]interface{}{
 		"api":       apiName,
 		"query":     query,
 		"documents": payload,
-	}, "", "  ")
+	}
+	if scripts := r.MatchingScripts(connID, apiName, query, 5); len(scripts) > 0 {
+		resp["related_scripts"] = scripts
+		resp["script_hint"] = "A related script tool exists; call it directly (or as a run_task step) instead of re-deriving the steps."
+	}
+	body, _ := json.MarshalIndent(resp, "", "  ")
 	return string(body), nil
 }
 
@@ -992,8 +997,17 @@ func (r *Registry) DiscoverTask(connID, apiName, intent string) (string, error) 
 		"matched":     best != nil,
 		"suggestions": []string{},
 	}
+	scripts := r.MatchingScripts(connID, apiName, intent, 5)
+	if len(scripts) > 0 {
+		resp["scripts"] = scripts
+		resp["script_hint"] = "A related script tool exists; call it directly instead of re-deriving the steps."
+	}
 	if best == nil {
-		resp["message"] = "No capability matches this intent. Run knowledge_search or add/describe a capability with knowledge_upsert."
+		if len(scripts) > 0 {
+			resp["message"] = "No capability matches this intent, but related script tool(s) exist and can be called directly (or promoted into a capability)."
+		} else {
+			resp["message"] = "No capability matches this intent. Run knowledge_search or add/describe a capability with knowledge_upsert."
+		}
 		body, _ := json.MarshalIndent(resp, "", "  ")
 		return string(body), nil
 	}
@@ -1033,13 +1047,28 @@ func (r *Registry) ClarifyKnowledge(connID, apiName, intent string) (string, err
 		return "", err
 	}
 	hits := r.mergedLibrary(entry, connID).Search(intent, 5)
+	scripts := r.MatchingScripts(connID, apiName, intent, 5)
 	if len(hits) == 0 {
+		if len(scripts) > 0 {
+			var b strings.Builder
+			fmt.Fprintf(&b, "No knowledge matching %q, but related script tool(s) exist:\n", intent)
+			for _, s := range scripts {
+				fmt.Fprintf(&b, "  - %s (%v) exposed=%v\n", s["name"], s["summary"], s["exposed"])
+			}
+			return strings.TrimSpace(b.String()), nil
+		}
 		return fmt.Sprintf("No knowledge matching %q. Suggest adding a glossary term (knowledge_upsert, kind glossary) or endpoints docs (knowledge_init).", intent), nil
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Closest documents for %q:\n", intent)
 	for _, h := range hits {
 		fmt.Fprintf(&b, "  - %s [%s] (score %d)\n", h.Doc.Title, h.Doc.Path, h.Score)
+	}
+	if len(scripts) > 0 {
+		b.WriteString("Related scripts:\n")
+		for _, s := range scripts {
+			fmt.Fprintf(&b, "  - %s (%v) exposed=%v\n", s["name"], s["summary"], s["exposed"])
+		}
 	}
 	return strings.TrimSpace(b.String()), nil
 }
