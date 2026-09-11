@@ -233,3 +233,17 @@ func (lib *Library) Capabilities() []*Doc {
 	}
 	return out
 }
+
+// Views returns the non-draft view and dashboard documents.
+func (lib *Library) Views() []*Doc {
+	if lib == nil {
+		return nil
+	}
+	var out []*Doc
+	for _, d := range lib.Docs {
+		if (d.Kind == KindView || d.Kind == KindDashboard) && !d.Draft {
+			out = append(out, d)
+		}
+	}
+	return out
+}

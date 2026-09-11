@@ -125,8 +125,10 @@ func (r *Registry) RunTask(connID, apiName, task string, params map[string]inter
 	var exec strings.Builder
 	exec.WriteString(strings.TrimSpace(plan.String()))
 	exec.WriteString("\n\n--- execution ---\n")
+	var executedTools []string
 	for i, step := range cap.Steps {
 		tool := normalizeToolName(apiName, step.Tool)
+		executedTools = append(executedTools, tool)
 		inputs, err := resolveStepInputs(step.Inputs, params, stepOutputs, i, capOptionalParams(cap))
 		if err != nil {
 			return "", fmt.Errorf("step %d (%s): %w", i+1, tool, err)
@@ -160,7 +162,56 @@ func (r *Registry) RunTask(connID, apiName, task string, params map[string]inter
 			}
 		}
 	}
+	if len(executedTools) > 0 {
+		if views := r.autoShowViews(entry, connID, cap.ID, executedTools); len(views) > 0 {
+			exec.WriteString("\n--- auto-displayed views ---\n")
+			for i, viewDoc := range views {
+				rendered, renderErr := r.RenderView(connID, apiName, "", viewDoc.ID, nil)
+				if renderErr != nil {
+					fmt.Fprintf(&exec, "\n[%d] %s (%s)\n    render error: %s\n", i+1, viewDoc.ID, viewDoc.Kind, renderErr)
+					continue
+				}
+				fmt.Fprintf(&exec, "\n[%d] %s (%s)\n%s\n", i+1, viewDoc.ID, viewDoc.Kind, rendered)
+			}
+		}
+	}
 	return strings.TrimSpace(exec.String()), nil
+}
+
+// autoShowViews returns the dashboards/views in the API's merged library whose
+// View.Source resolves to one of the tools executed by the just-completed task
+// and which request auto-display when that source completes.
+func (r *Registry) autoShowViews(entry *apiEntry, connID, capID string, executedTools []string) []*knowledge.Doc {
+	if len(executedTools) == 0 {
+		return nil
+	}
+	lib := r.mergedLibrary(entry, connID)
+	executed := map[string]bool{}
+	for _, t := range executedTools {
+		executed[t] = true
+	}
+	var out []*knowledge.Doc
+	for _, d := range lib.Views() {
+		if d.View == nil || !d.View.AutoShow {
+			continue
+		}
+		src := strings.TrimSpace(d.View.Source)
+		if src == "" {
+			continue
+		}
+		if executed[src] {
+			out = append(out, d)
+			continue
+		}
+		if strings.HasPrefix(src, entry.Def.Name+toolNameSep) || !strings.Contains(src, toolNameSep) {
+			if executed[normalizeToolName(entry.Def.Name, src)] {
+				out = append(out, d)
+			}
+		} else if src == capID {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // capOptionalParams returns the set of capability parameters declared optional.

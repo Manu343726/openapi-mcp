@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -1099,6 +1100,87 @@ view:
 	_, err = reg.RenderView("conn-1", "acme", "views", "must", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "requires input")
+}
+
+func TestRunTaskAutoDisplaysBoundDashboard(t *testing.T) {
+	// Backend that count hits so we can assert the dashboard's backing call
+	// is re-issued for auto-display after the task's own execution.
+	var mu sync.Mutex
+	hits := 0
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `[{"user":1,"action":"login","time":"12:00"}]`)
+	}))
+	defer backend.Close()
+
+	reg := NewRegistry("")
+	_, err := reg.RegisterAPI(config.APIDefinition{
+		Name: "acme",
+		Spec: `{"openapi":"3.0.0","info":{"title":"Acme","version":"1"},"paths":{"/users":{"get":{"operationId":"listUserActions","responses":{"200":{"description":"OK"}}}}}}`,
+		Targets: []config.TargetDefinition{
+			{Name: "default", BaseURL: backend.URL},
+		},
+		Knowledge: config.KnowledgeConfig{Enabled: true, Language: "en", Root: t.TempDir()},
+	}, false)
+	require.NoError(t, err)
+
+	// Capability with one step that calls the source tool of the dashboard.
+	capMD := `---
+id: list-activity
+kind: capability
+api: acme
+intents: [show recent activity]
+steps:
+  - tool: acme__listUserActions
+---
+# List activity
+`
+	_, err = reg.KnowledgeUpsert("conn-1", "acme", capMD, "capabilities/list-activity.md", false)
+	require.NoError(t, err)
+
+	// Dashboard bound to the task's tool, auto_show set.
+	dashMD := `---
+id: activity-dash
+kind: dashboard
+api: acme
+view:
+  source: acme__listUserActions
+  layout: table
+  auto_show: true
+---
+# Activity dashboard
+`
+	_, err = reg.KnowledgeUpsert("conn-1", "acme", dashMD, "dashboards/activity-dash.md", false)
+	require.NoError(t, err)
+
+	// A non-matching dashboard (different source) must NOT auto-display.
+	otherMD := `---
+id: other
+kind: dashboard
+view:
+  source: acme__someOtherTool
+  auto_show: true
+---
+# Other
+`
+	_, err = reg.KnowledgeUpsert("conn-1", "acme", otherMD, "dashboards/other.md", false)
+	require.NoError(t, err)
+
+	out, err := reg.RunTask("conn-1", "acme", "list-activity", nil, "", TaskModeAuto)
+	require.NoError(t, err)
+	assert.Contains(t, out, "--- auto-displayed views ---")
+	assert.Contains(t, out, "activity-dash")
+	assert.Contains(t, out, `"resolved_tool": "acme__listUserActions"`)
+	assert.Contains(t, out, `"auto_show": true`)
+	// The non-matching dashboard is not shown.
+	assert.NotContains(t, out, "other")
+	// Task step ran once; dashboard auto-display re-issued the backing call.
+	mu.Lock()
+	defer mu.Unlock()
+	assert.GreaterOrEqual(t, hits, 2)
 }
 
 func registerLearningEntry(t *testing.T, reg *Registry, root string) {

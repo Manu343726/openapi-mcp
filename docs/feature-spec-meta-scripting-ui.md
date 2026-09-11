@@ -1,7 +1,10 @@
 # Plan — Meta knowledge base, scripting (tengo), dynamic exposure, and web UI (CopilotKit)
 
 > Status: **specification**, with **Phase 1 (meta knowledge base) implemented and
-> tested**; Phase 2+ planned below. This document is the detailed
+> tested**, and **Phase 7's `view`/`dashboard` model + `view` tool + `run_task`
+> auto-display implemented and tested** (see §4.6, §7, and the "Implementation
+> progress" section at the end); Phase 2+ planned below. This document is the
+> detailed
 > development guide for four coordinated features on top of the per-API semantic
 > knowledge base (`docs/knowledge.md`, implemented):
 >
@@ -1017,3 +1020,50 @@ Phase 5–6, open `/ui` and drive a chat tool call end-to-end. Phase 7 adds the
    details). Whether rich dashboard widgets need a declarative mini-language in
    the KB (e.g. chart series, grouping) or if enumerated layouts + inputs suffice
    for Phase 7.
+## 8. Implementation progress
+
+Tracked against §6. Each item links the working changes that shipped it.
+
+### Completed
+
+- **Phase 1 — Meta KB** (commits `985ed9c`, part of `417653a`): `_meta`
+  virtual entry, `meta_init` / `meta_status` / `meta_sync`, `kind: view`/
+  `kind: dashboard` model kinds in `pkg/knowledge` (`model.go`, `links.go`,
+  `store.go`, `templates.go`, `backend.go`), knowledge tools accepting `_meta`,
+  `kb:` links.
+- **Phase 7 (model + view tool + run_task auto-display)** (commits `417653a`,
+  `ea3aff1`, and the run_task auto-show work):
+  - `pkg/knowledge/model.go`: `KindView`/`KindDashboard`, `View`/`ViewInput`
+    blocks (source, inputs, layout, auto_show), `Doc.View`, `Serialize`
+    round-trip, `Library.Views()`, overlay/per-path placement for
+    `views/…` and `dashboards/…` (`overlayPathFor`).
+  - `pkg/server/knowledge_tools.go` + `knowledge.go`: the `view` tool
+    (`api`, `scope`, `view_id`, `inputs`) — resolves the doc (session overlay
+    first, then library by id or scoped path), fills declared inputs
+    (provided → default → ""), rejects missing required inputs, resolves
+    `view.source` to the registered tool and executes the backing call, then
+    returns a structured render payload (`view_id`, `kind`, `title`, `summary`,
+    `source`, `layout`, `auto_show`, `inputs`, `columns`/`rows`/`count`, or raw
+    `text` for unknown shapes, plus `resolved_tool`/`status_code`/
+    `call_error`/`source_unresolved`). Tool name in the payload uses the full
+    MCP name (`<api>__<operationId>`, never string-surgery).
+  - `pkg/server/tasks.go`: `run_task` auto mode appends an
+    `--- auto-displayed views ---` block for every dashboard/view in the
+    merged library whose `view.source` was executed by the task and whose
+    `auto_show: true` (via `autoShowViews` + `Library.Views()`), rendering each
+    through the same `RenderView` path so the backing call is re-issued with
+    the bound inputs.
+  - Tests: `TestSerializeViewRoundTrip` (knowledge), `TestViewToolRendersDashboard`
+    (render payload shape, input binding, required-input rejection, dashboard
+    doc→view resolution) and `TestRunTaskAutoDisplaysBoundDashboard`
+    (run_task emits the bound dashboard on completion, non-matching dashboards
+    are excluded, backing call re-issued) in `pkg/server`.
+
+### In progress / next
+
+- Phase 7 remainder: result→view wrapper firing `view` events on the session
+  stream (needs the Phase 5/6 web-session bridge for delivery), dashboard
+  auto-display surfaced through `/ui`, and the front-end serializer + input
+  controls re-issuing backing calls.
+- Phases 2–6 (dynamic exposure, scripting, web UI shell, generative UI) as
+  planned in §6.
