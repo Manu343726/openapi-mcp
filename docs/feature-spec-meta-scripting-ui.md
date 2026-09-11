@@ -3,11 +3,12 @@
 > Status: **specification**, with **Phase 1 (meta knowledge base) implemented and
 > tested**, **Phase 2 (dynamic exposure / runtime tool footprint) implemented and
 > tested**, **Phase 3 (scripting core, tengo) implemented and tested**, **Phase 4
-> (scripting hardening) implemented and tested**, and
+> (scripting hardening) implemented and tested**, **Phase 5 (web UI shell)
+> implemented and tested**, and
 > **Phase 7's `view`/`dashboard` model + `view` tool + `run_task`
 > auto-display implemented and tested** (see §2, §3, §4.6, §7, and the
 > "Implementation
-> progress" section at the end); Phase 5+ planned below. This document is the
+> progress" section at the end); Phase 6+ planned below. This document is the
 > detailed
 > development guide for four coordinated features on top of the per-API semantic
 > knowledge base (`docs/knowledge.md`, implemented):
@@ -1173,38 +1174,65 @@ Tracked against §6. Each item links the working changes that shipped it.
   - Tests: `TestScriptViewSurfacesTimeoutAndIntents`,
     `TestScriptDiscoveryHints`, `TestScriptRunFoldsIntoCapabilityDraft`,
     `TestPromoteSequenceToScript` (+ the cache test above).
+- **Phase 5 — Web UI shell**: implemented:
+  - `webui/`: a committed, dependency-free static bundle (`dist/index.html`,
+    `dist/app.js`, `dist/style.css`) embedded via `webui/embed.go`
+    (`go:embed dist`), so `go build` never needs Node. The shell renders the
+    manifest, calls tools and listens for broadcast notifications.
+  - `pkg/config`: `ServerConfig.UI` (`UIServerConfig`: `enabled` (default true),
+    `session_header` (default `X-Ui-Session`), `max_sessions` (default 100),
+    `token_env`) with `IsEnabled`/`ResolveSessionHeader`/`ResolveMaxSessions`/
+    `ResolveToken`.
+  - `pkg/server/ui.go`: `UIBridge` + `Registry.UIManifest(connID)`; endpoints
+    `/ui` (embedded SPA), `/ui/` (static assets), `/ui/manifest` (session-aware
+    registry snapshot: APIs/targets/exposure/knowledge + scripts + tools +
+    server), `/ui/chat` (POST a tool call or a message; drives
+    `Registry.CallTool`), and `/ui/events` (per-session SSE of broadcast
+    notifications). Each browser tab maps to a dedicated `connID`, registered in
+    `activeConnections`/`initializedConnections`, so per-session overlays,
+    targets, exposure, learning and `DropSession` behave exactly as for an MCP
+    client; `max_sessions` and the optional bearer token are enforced.
+  - `ServeMCP` mounts the UI routes when `server.ui` is enabled.
+  - Tests (`pkg/server/ui_test.go`): session-aware manifest, chat dispatch to
+    management + script tools, two-session isolation + targeted `DropSession`,
+    `max_sessions`, bearer token, per-session broadcast delivery and static
+    asset serving. Live-verified: `/ui`, `/ui/app.js`, `/ui/manifest`,
+    `/ui/chat`, and web-1 vs web-2 exposure isolation.
 
 ### In progress / next
 
 - Phase 7 remainder: result→view wrapper firing `view` events on the session
-  stream (needs the Phase 5/6 web-session bridge for delivery), dashboard
+  stream (now that `/ui/events` exists, this is deliverable), dashboard
   auto-display surfaced through `/ui`, and the front-end serializer + input
   controls re-issuing backing calls.
-- Phase 5 — Web UI shell (CopilotKit) and Phase 6 — generative UI, as planned in
-  §6/§4: the per-session isolation, manifest-driven exposure surface, session
-  mirror and view/dashboard rendering are already in place, so the remaining work
-  is the front-end shell that consumes them.
+- Phase 6 — Generative UI: replace/augment the dependency-free shell in
+  `webui/dist` with a CopilotKit front-end (`@copilotkit/react-core`,
+  `react-ui`, `react-textarea`) and build the GenUI component map for tool
+  calls, scripts, knowledge results, `run_task` plans, exposure changes and
+  `view`/`dashboard` payloads, plus the context-dependent landing view. The Go
+  bridge endpoints (`/ui/manifest`, `/ui/chat`, `/ui/events`) stay as-is.
 
 ### Resume here (next working session)
 
-**Status:** Phases 1 (meta KB), 2 (dynamic exposure), 3 (scripting core) and 4
-(scripting hardening) are implemented, tested and committed to `main`; the Phase 7
-view/dashboard model is done pending the Phase 5/6 UI bridge (§8 above).
-`pkg/script` (`executor.go`/`modules.go`), `pkg/knowledge/script.go`,
-`pkg/server/scripts.go` and their `_test.go` files are the main additions.
+**Status:** Phases 1 (meta KB), 2 (dynamic exposure), 3 (scripting core), 4
+(scripting hardening) and 5 (web UI shell) are implemented, tested and committed
+to `main`; the Phase 7 view/dashboard model is done pending the Phase 6 GenUI +
+result→view wiring (§8 above). Newest additions: `webui/`
+(embed + `dist/`), `pkg/server/ui.go`, `pkg/server/ui_test.go`.
 
-**Next up: Phase 5 — Web UI shell (§4).** Suggested order:
+**Next up: Phase 6 — Generative UI (§4.3, §4.5, §7).** Suggested order:
 
-1. Stand up the CopilotKit shell that talks to the streamable-HTTP MCP and the
-   session mirror; reuse `pkg/server`'s `view`/`dashboard` renders.
-2. Wire per-session isolation (`X-Connection-ID` / `sessionId`) end-to-end so
-   `update_session_api_exposure` and session-active targets work from the UI — note
-   that stateless streamable HTTP currently yields `connID=""`, so session-scoped
-   tools need the legacy SSE connection id (or a new session header) plumbed.
-3. Surface `api_exposure` (which now includes scripts) as the UI's tool-footprint
-   control, and the script tools/`script_list` as first-class actions.
+1. Add the CopilotKit React app under `webui/` with a Node build emitted into
+   `dist/` (`make webui`); keep `dist/` committed so the default `go build`
+   stays Node-free.
+2. Build the component map: tool-call cards (method/path from the enriched tool
+   description), script cards, `knowledge_search` link lists, `run_task` step
+   checklists, exposure-change indicators, and `view`/`dashboard` render
+   payloads (table/list/cards/chart) with live inputs re-issuing the backing call.
+3. Implement the result→view wrapper so every tool/task/script outcome emits a
+   `view` event on `/ui/events`; wire dashboard auto-display through the UI.
 
-**Working notes (Phase 3/4 were developed here):**
+**Working notes (Phase 3–5 were developed here):**
 
 - `pkg/script` is intentionally independent of `pkg/server`/`pkg/knowledge`:
   callers inject the host bridge through `script.Host` at run time, and the
@@ -1215,6 +1243,11 @@ view/dashboard model is done pending the Phase 5/6 UI bridge (§8 above).
   per-session exposure gate uses the synthetic `script` tag (`scriptTag`).
 - A script colliding with an operation or management tool is a hard
   registration error from `rebuild`.
+- The web UI reuses the MCP per-connection state: a browser tab's `X-Ui-Session`
+  maps to a `connID` registered in `activeConnections`/`initializedConnections`,
+  so session-scoped tools (exposure, targets, overlay) and broadcasts work
+  unchanged. `/ui/chat` calls `Registry.CallTool`; `/ui/events` streams that
+  session's channel.
 - Always resolve tool names through `toolFullName`/the registry maps
   (`ResolveTool`/`scriptToolFor`/`IsToolExposedForSession`) — capped/truncated
   names must never be re-derived by string surgery.

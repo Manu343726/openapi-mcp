@@ -512,6 +512,57 @@ type ServerConfig struct {
 	// on every reload_config (and can be changed at runtime via the
 	// set_log_level management tool). Empty keeps the flag default.
 	LogLevel string `json:"log_level,omitempty" yaml:"log_level,omitempty"`
+
+	// UI configures the browser-facing web UI shell served alongside /mcp.
+	UI UIServerConfig `json:"ui,omitempty" yaml:"ui,omitempty"`
+}
+
+// UIServerConfig configures the interactive web UI shell (/ui, /ui/manifest,
+// /ui/chat, /ui/events). The Go server serves a pre-built static bundle and a
+// JSON bridge into the live registry; each browser tab is its own MCP session.
+type UIServerConfig struct {
+	// Enabled turns the UI endpoints on/off. Absent means enabled (the UI is on
+	// by default); set enabled: false to switch it off.
+	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	// SessionHeader is the request header carrying the opaque per-tab session
+	// token (default "X-Ui-Session"); the "?session=" query parameter is also
+	// accepted.
+	SessionHeader string `json:"session_header,omitempty" yaml:"session_header,omitempty"`
+	// MaxSessions caps concurrent browser sessions (default 100); new sessions
+	// beyond the cap are rejected.
+	MaxSessions int `json:"max_sessions,omitempty" yaml:"max_sessions,omitempty"`
+	// TokenEnv names an environment variable holding a bearer token required to
+	// use the UI endpoints. Empty leaves the UI open (e.g. on the local network).
+	TokenEnv string `json:"token_env,omitempty" yaml:"token_env,omitempty"`
+}
+
+// IsEnabled reports whether the web UI is enabled (default true).
+func (u UIServerConfig) IsEnabled() bool { return u.Enabled == nil || *u.Enabled }
+
+// ResolveSessionHeader returns the configured session header, defaulting to
+// "X-Ui-Session".
+func (u UIServerConfig) ResolveSessionHeader() string {
+	if strings.TrimSpace(u.SessionHeader) == "" {
+		return "X-Ui-Session"
+	}
+	return u.SessionHeader
+}
+
+// ResolveMaxSessions returns the configured concurrent-session cap (default 100).
+func (u UIServerConfig) ResolveMaxSessions() int {
+	if u.MaxSessions <= 0 {
+		return 100
+	}
+	return u.MaxSessions
+}
+
+// ResolveToken returns the bearer token gating the UI endpoints, read from
+// TokenEnv. Empty means the UI is open.
+func (u UIServerConfig) ResolveToken() string {
+	if u.TokenEnv == "" {
+		return ""
+	}
+	return os.Getenv(u.TokenEnv)
 }
 
 // MetaConfig configures the meta knowledge base: a global knowledge scope

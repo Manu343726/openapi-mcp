@@ -272,3 +272,20 @@ func TestResolveKnowledgeBackendEnvPrecedence(t *testing.T) {
 	assert.Equal(t, "auto", got.Sync)
 	assert.Equal(t, "rebase", got.Conflict)
 }
+
+func TestUIServerConfigDefaults(t *testing.T) {
+	var u UIServerConfig
+	assert.True(t, u.IsEnabled(), "UI enabled by default")
+	assert.Equal(t, "X-Ui-Session", u.ResolveSessionHeader())
+	assert.Equal(t, 100, u.ResolveMaxSessions())
+	assert.Equal(t, "", u.ResolveToken())
+
+	disabled := false
+	u2 := UIServerConfig{Enabled: &disabled, SessionHeader: "X-Custom", MaxSessions: 2, TokenEnv: "UI_DEFAULTS_TEST_TOKEN"}
+	assert.False(t, u2.IsEnabled())
+	assert.Equal(t, "X-Custom", u2.ResolveSessionHeader())
+	assert.Equal(t, 2, u2.ResolveMaxSessions())
+
+	t.Setenv("UI_DEFAULTS_TEST_TOKEN", "abc")
+	assert.Equal(t, "abc", u2.ResolveToken())
+}

@@ -103,6 +103,13 @@ The MCP reads the API's OpenAPI security schemes (`apiKey`, `http` basic/bearer,
 - `tools.listChanged` advertised and broadcast after registry mutations.
 - `initialize` echoes the client's requested protocol version.
 
+### Semantic knowledge, scripting & web UI
+
+- **Semantic knowledge base:** a per-API and global (`_meta`) Markdown library of glossary, endpoint, schema, capability (`run_task`) and view/dashboard documents; git- or locally-backed, with session overlays and learning.
+- **Executable scripts:** `kind: script` docs (tengo) are surfaced as MCP tools under a sandbox (`mcp`/`os`/`exec`/`fs`/`http` modules are default-deny behind declared permissions and operator allowlists). The `mcp` module lets a script chain other tools, and `knowledge_promote_script` turns a recorded session sequence into a reusable script.
+- **Dynamic exposure:** slim the served tool footprint per API or per session (`update_api_exposure` / `update_session_api_exposure`); include/exclude config is the hard allow-set.
+- **Interactive web UI:** a pre-built shell at `/ui` (`/ui/manifest`, `/ui/chat`, `/ui/events`) mirrors the live registry for the browser, with one isolated MCP session per tab. Enable/gate it via `server.ui` (`enabled`, `session_header`, `max_sessions`, `token_env`).
+
 ### Deployment & configuration
 
 - **YAML config file** (`server.port`, `apis`, `targets`, `auth`); writes back on every runtime registration.

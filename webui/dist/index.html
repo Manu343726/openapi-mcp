@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>openapi-mcp UI</title>
+  <link rel="stylesheet" href="/ui/style.css" />
+</head>
+<body>
+  <header>
+    <h1>openapi-mcp</h1>
+    <span id="status" class="pill">connecting…</span>
+    <span id="toolcount" class="pill"></span>
+  </header>
+  <main>
+    <aside id="sidebar">
+      <h2>APIs</h2>
+      <div id="apis" class="list"></div>
+      <h2>Scripts</h2>
+      <div id="scripts" class="list"></div>
+    </aside>
+    <section id="content">
+      <div id="log"></div>
+      <form id="composer">
+        <div class="row">
+          <select id="tool"></select>
+          <input id="args" placeholder='arguments JSON, e.g. {"name":"ada"}' />
+          <button type="submit">Run tool</button>
+        </div>
+        <div class="row">
+          <input id="message" placeholder="…or type a message and press Enter" />
+          <button type="button" id="send">Send</button>
+        </div>
+      </form>
+    </section>
+  </main>
+  <script src="/ui/app.js"></script>
+</body>
+</html>

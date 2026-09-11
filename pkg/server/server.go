@@ -162,6 +162,12 @@ func ServeMCP(addr string, reg *Registry) error {
 	// Setup server mux
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", mcpHandler) // Single endpoint for GET/POST/OPTIONS
+	if reg.ServerConfig().UI.IsEnabled() {
+		NewUIBridge(reg).RegisterRoutes(mux)
+		serverLog.Info("web UI enabled", "path", "/ui")
+	} else {
+		serverLog.Info("web UI disabled")
+	}
 
 	serverLog.Info("MCP server listening", "addr", addr+"/mcp")
 	return http.ListenAndServe(addr, mux)

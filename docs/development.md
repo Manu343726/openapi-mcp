@@ -236,6 +236,25 @@ These are deliberate constraints — the tests and behavior rely on them.
   `confirm=false`, write with `confirm=true`). `knowledge_search`/`discover_task`/
   `knowledge_clarify` surface related scripts by id/intents/summary/tags.
 
+## Web UI (`webui/`, `pkg/server/ui.go`)
+
+- `server.ui` (`pkg/config`): `enabled` (default true), `session_header` (default
+  `X-Ui-Session`), `max_sessions` (default 100), `token_env` (optional bearer
+  token). `ServeMCP` mounts the routes when `UI.IsEnabled()`.
+- **Static bundle is committed and embedded** (`webui/embed.go`, `//go:embed
+  dist`): the default shell is dependency-free HTML/CSS/JS, so `go build` never
+  needs Node. Phase 6 will add a CopilotKit build emitted into `webui/dist`.
+- **Endpoints**: `/ui` (SPA), `/ui/` (assets), `/ui/manifest` (session-aware
+  registry snapshot), `/ui/chat` (POST `{tool,arguments}` or `{message}`; drives
+  `Registry.CallTool`), `/ui/events` (per-session SSE of broadcast
+  notifications).
+- **Per-session isolation**: each browser tab's session token maps to its own MCP
+  `connID`, registered in `activeConnections`/`initializedConnections`. That
+  reuses all existing `connID`-keyed state (knowledge overlay, session targets,
+  exposure overrides, learning traces) and `DropSession`; `UIBridge.DropSession`
+  is idempotent and only frees that tab. Keep it that way — don't add global UI
+  state.
+
 ## MCP protocol (`pkg/server/server.go` `dispatchJSONRPC`)
 
 - Standard notifications (including `notifications/cancelled`) are accepted
