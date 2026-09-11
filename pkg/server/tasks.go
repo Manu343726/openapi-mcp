@@ -88,6 +88,7 @@ func (r *Registry) RunTask(connID, apiName, task string, params map[string]inter
 	stepOutputs := make([]map[string]string, len(cap.Steps))
 	for i, step := range cap.Steps {
 		tool := normalizeToolName(apiName, step.Tool)
+		_, isScript := r.scriptToolFor(tool)
 		staticOK := false
 		if entry.ToolSet != nil {
 			_, staticOK = entry.ToolSet.Operations[strings.TrimPrefix(tool, apiName+toolNameSep)]
@@ -95,11 +96,23 @@ func (r *Registry) RunTask(connID, apiName, task string, params map[string]inter
 				_, staticOK = entry.ToolSet.Operations[tool]
 			}
 		}
+		// Dynamic-exposure status for this session: a tool that is registered but
+		// not exposed to THIS session is flagged INACTIVE so the agent knows it
+		// must activate it (or it is an external/management tool).
+		exposed := r.IsToolExposedForSession(connID, tool)
 		inputs, err := resolveStepInputs(step.Inputs, params, stepOutputs, i, capOptionalParams(cap))
 		if err != nil {
 			return "", fmt.Errorf("step %d (%s): %w", i+1, tool, err)
 		}
-		fmt.Fprintf(&plan, "\n[%d] %s (static %s)\n", i+1, tool, map[bool]string{true: "ok", false: "UNKNOWN"}[staticOK])
+		kind := map[bool]string{true: "ok", false: "UNKNOWN"}[staticOK]
+		if isScript {
+			kind = "script"
+		}
+		if !exposed {
+			fmt.Fprintf(&plan, "\n[%d] %s (static %s, not exposed in this session — enable with update_session_api_exposure before running)\n", i+1, tool, kind)
+		} else {
+			fmt.Fprintf(&plan, "\n[%d] %s (static %s, exposed)\n", i+1, tool, kind)
+		}
 		for k, v := range inputs {
 			fmt.Fprintf(&plan, "    %s = %v\n", k, v)
 		}
@@ -135,6 +148,28 @@ func (r *Registry) RunTask(connID, apiName, task string, params map[string]inter
 		}
 		if target != "" {
 			inputs[targetArgName] = target
+		}
+		// Script steps run through the script executor, not HTTP.
+		if sref, isScript := r.scriptToolFor(tool); isScript {
+			text, execErr := r.RunScript(connID, tool, inputs)
+			if execErr != nil {
+				return "", fmt.Errorf("step %d (%s) failed: %w (partial progress above)", i+1, tool, execErr)
+			}
+			r.RecordTrace(connID, sref.scope, tool, inputs)
+			fmt.Fprintf(&exec, "[%d] %s -> script\n", i+1, tool)
+			if len(text) > 0 {
+				fmt.Fprintf(&exec, "    result: %s\n", truncate(text, 400))
+			}
+			if len(step.Outputs) > 0 {
+				stepOutputs[i] = map[string]string{}
+				for name, expr := range step.Outputs {
+					if v, ok := evalJSONPath(text, expr); ok {
+						stepOutputs[i][name] = v
+						fmt.Fprintf(&exec, "    captured %s = %s\n", name, truncate(v, 200))
+					}
+				}
+			}
+			continue
 		}
 		httpResp, execErr := executeRegisteredTool(r, connID, &ToolCallParams{ToolName: tool, Input: inputs})
 		if execErr != nil {

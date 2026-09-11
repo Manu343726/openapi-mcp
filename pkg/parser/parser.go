@@ -385,7 +385,7 @@ func generateToolSetV3(doc *openapi3.T, cfg *config.Config) (*mcp.ToolSet, error
 	for _, rawPath := range paths { // Rename loop var to rawPath
 		pathItem := doc.Paths.Value(rawPath)
 		for method, op := range pathItem.Operations() {
-			if op == nil || !shouldIncludeOperationV3(op, cfg) {
+			if op == nil {
 				continue
 			}
 
@@ -529,10 +529,6 @@ func getOperationDescriptionV3(op *openapi3.Operation) string {
 		return op.Summary
 	}
 	return op.Description
-}
-
-func shouldIncludeOperationV3(op *openapi3.Operation, cfg *config.Config) bool {
-	return shouldInclude(op.OperationID, op.Tags, cfg)
 }
 
 // parametersToMCPSchemaAndDetailsV3 converts parameters and also returns the parameter details.
@@ -711,7 +707,7 @@ func generateToolSetV2(doc *spec.Swagger, cfg *config.Config) (*mcp.ToolSet, err
 		}
 
 		for method, op := range ops {
-			if op == nil || !shouldIncludeOperationV2(op, cfg) {
+			if op == nil {
 				continue
 			}
 
@@ -844,10 +840,6 @@ func getOperationDescriptionV2(op *spec.Operation) string {
 		return op.Summary
 	}
 	return op.Description
-}
-
-func shouldIncludeOperationV2(op *spec.Operation, cfg *config.Config) bool {
-	return shouldInclude(op.ID, op.Tags, cfg)
 }
 
 // parametersToMCPSchemaAndDetailsV2 converts V2 parameters and also returns details and request body.
@@ -1150,40 +1142,6 @@ func generateDefaultToolName(method, path string) string {
 		}
 	}
 	return strings.Join(nameParts, "")
-}
-
-// shouldInclude determines if an operation should be included based on config filters.
-func shouldInclude(opID string, opTags []string, cfg *config.Config) bool {
-	// Exclusion rules take precedence
-	if len(cfg.ExcludeOperations) > 0 && opID != "" && sliceContains(cfg.ExcludeOperations, opID) {
-		return false
-	}
-	if len(cfg.ExcludeTags) > 0 {
-		for _, tag := range opTags {
-			if sliceContains(cfg.ExcludeTags, tag) {
-				return false
-			}
-		}
-	}
-
-	// Inclusion rules
-	hasInclusionRule := len(cfg.IncludeOperations) > 0 || len(cfg.IncludeTags) > 0
-	if !hasInclusionRule {
-		return true
-	} // No inclusion rules, include by default
-
-	if len(cfg.IncludeOperations) > 0 {
-		if opID != "" && sliceContains(cfg.IncludeOperations, opID) {
-			return true
-		}
-	} else if len(cfg.IncludeTags) > 0 {
-		for _, tag := range opTags {
-			if sliceContains(cfg.IncludeTags, tag) {
-				return true
-			}
-		}
-	}
-	return false // Did not match any inclusion rule
 }
 
 // mapJSONSchemaType ensures the type is one recognized by JSON Schema / MCP.

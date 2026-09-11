@@ -18,6 +18,18 @@ Before modifying, testing, or extending this project, read:
 4. **`docs/api-introspection.md`** — introspection/documentation tools.
 5. **`docs/knowledge.md`** — the semantic knowledge base (Markdown library,
    git- and local-backed) and the `run_task` machinery.
+6. **`docs/feature-spec-meta-scripting-ui.md`** — the phased **development plan**
+   (meta KB, scripting, dynamic exposure, web UI). Its "Implementation progress"
+   / "Resume here" section is the canonical current-status + next-steps log; read
+   it before starting new feature work and update it when a phase lands.
+
+## Development plan
+
+Work follows the phases in `docs/feature-spec-meta-scripting-ui.md` §6. As of the
+last commit: Phases 1 (meta KB), 2 (dynamic exposure), 3 (tengo scripting core)
+and the Phase 7 view/dashboard model are **done**; **Phase 4 (scripting
+hardening)** is next. Prefer continuing the plan (and updating that section) over
+starting unrelated features.
 
 ## Project at a glance
 
@@ -26,7 +38,8 @@ Before modifying, testing, or extending this project, read:
 - Entry point: `cmd/openapi-mcp/main.go`. Core packages: `pkg/parser` (spec ->
   tools), `pkg/server` (JSON-RPC 2.0 over SSE + streamable HTTP, registry,
   management/introspection/knowledge tools), `pkg/config` (YAML config),
-  `pkg/knowledge` (Markdown knowledge base), `pkg/logx` (structured logging).
+  `pkg/knowledge` (Markdown knowledge base), `pkg/script` (sandboxed tengo
+  script executor), `pkg/logx` (structured logging).
 - Build, run, test: `make build`, `make run`, `make run-server`, `make test`.
   See `docs/development.md` for details and known caveats (one package's tests
   can hang without a network / longer timeout).

@@ -55,7 +55,8 @@ func (l *LocalBackend) ListFiles() ([]string, error) {
 		if d.IsDir() {
 			return nil
 		}
-		if !strings.HasSuffix(strings.ToLower(d.Name()), ".md") {
+		lower := strings.ToLower(d.Name())
+		if !strings.HasSuffix(lower, ".md") && !strings.HasSuffix(lower, ".tengo") {
 			return nil
 		}
 		rel, err := filepath.Rel(l.root, p)
@@ -99,22 +100,23 @@ func (l *LocalBackend) Push() error { return nil }
 func Serialize(doc *Doc) ([]byte, error) {
 	// The Doc struct carries yaml tags; a dedicated snippet keeps body separate.
 	type fm struct {
-		ID          string   `yaml:"id,omitempty"`
-		Kind        Kind     `yaml:"kind,omitempty"`
-		API         string   `yaml:"api,omitempty"`
-		Language    string   `yaml:"language,omitempty"`
-		Summary     string   `yaml:"summary,omitempty"`
-		Anchor      string   `yaml:"anchor,omitempty"`
-		Tags        []string `yaml:"tags,omitempty"`
-		Intents     []string `yaml:"intents,omitempty"`
-		Params      []Param  `yaml:"params,omitempty"`
-		Steps       []Step   `yaml:"steps,omitempty"`
-		Related     []Rel    `yaml:"related,omitempty"`
-		Permissions []string `yaml:"permissions,omitempty"`
-		View        *View    `yaml:"view,omitempty"`
-		Draft       bool     `yaml:"draft,omitempty"`
+		ID          string      `yaml:"id,omitempty"`
+		Kind        Kind        `yaml:"kind,omitempty"`
+		API         string      `yaml:"api,omitempty"`
+		Language    string      `yaml:"language,omitempty"`
+		Summary     string      `yaml:"summary,omitempty"`
+		Anchor      string      `yaml:"anchor,omitempty"`
+		Tags        []string    `yaml:"tags,omitempty"`
+		Intents     []string    `yaml:"intents,omitempty"`
+		Params      []Param     `yaml:"params,omitempty"`
+		Steps       []Step      `yaml:"steps,omitempty"`
+		Related     []Rel       `yaml:"related,omitempty"`
+		Permissions Permissions `yaml:"permissions,omitempty"`
+		View        *View       `yaml:"view,omitempty"`
+		Draft       bool        `yaml:"draft,omitempty"`
+		TimeoutS    int         `yaml:"timeout,omitempty"`
 	}
-	f := fm{doc.ID, doc.Kind, doc.API, doc.Language, doc.Summary, doc.Anchor, doc.Tags, doc.Intents, doc.Params, doc.Steps, doc.Related, doc.Permissions, doc.View, doc.Draft}
+	f := fm{doc.ID, doc.Kind, doc.API, doc.Language, doc.Summary, doc.Anchor, doc.Tags, doc.Intents, doc.Params, doc.Steps, doc.Related, doc.Permissions, doc.View, doc.Draft, doc.TimeoutS}
 	out, err := yaml.Marshal(f)
 	if err != nil {
 		return nil, err

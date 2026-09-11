@@ -48,6 +48,12 @@ const (
 	ToolSetSessionTarget   = "set_session_active_api_target"
 	ToolClearSessionTarget = "clear_session_active_api_target"
 	ToolGetSessionTarget   = "get_session_active_api_target"
+
+	// Exposure (runtime tool footprint).
+	ToolUpdateAPIExposure        = "update_api_exposure"
+	ToolUpdateSessionAPIExposure = "update_session_api_exposure"
+	ToolClearSessionAPIExposure  = "clear_session_api_exposure"
+	ToolAPIExposure              = "api_exposure"
 )
 
 // managementTools is the fixed set of management tools appended to every
@@ -124,6 +130,26 @@ func buildManagementTools() []mcp.Tool {
 			Name:        ToolGetSessionTarget,
 			Description: "Return this session's active-target override for an API (or none).",
 			InputSchema: nameOnlySchema("api", "Name of the registered API"),
+		},
+		{
+			Name:        ToolUpdateAPIExposure,
+			Description: "Change the RUNTIME TOOL FOOTPRINT of an API for every session (persisted): whole-API on/off, footprint mode (all = everything allowed except disabled, none = only what is explicitly activated), and per-tag / per-operation force-on/off. Operations excluded by the API's include/exclude config (the allow-set) can never be activated at runtime. Use mode='none' + activate_tags to slim the footprint to one section; a later mode='all' resets to the full allow-set. Emits tools/list_changed.",
+			InputSchema: exposureUpdateSchema("api", "Name of the registered API"),
+		},
+		{
+			Name:        ToolUpdateSessionAPIExposure,
+			Description: "Change the runtime tool footprint of an API for THIS session/connection only (never persisted; dropped on disconnect). Same shape as update_api_exposure, but only this session's tools/list view and call gate are affected. Other sessions are untouched. Emits tools/list_changed.",
+			InputSchema: exposureUpdateSchema("api", "Name of the registered API"),
+		},
+		{
+			Name:        ToolClearSessionAPIExposure,
+			Description: "Drop this session's footprint override for an API, reverting to the global baseline exposure.",
+			InputSchema: nameOnlySchema("api", "Name of the registered API"),
+		},
+		{
+			Name:        ToolAPIExposure,
+			Description: "Report an API's runtime footprint: global baseline and this session's effective exposure (active, mode, active/disabled tags and ops), totals (total/allowed/exposed/excluded-by-config), and — when 'api' is set — the per-operation status (exposed | hidden | session-hidden | excluded-by-config) so the agent knows exactly what it can toggle with update_session_api_exposure.",
+			InputSchema: nameOnlySchema("api", "Name of the registered API (omit for a full footprint report across all APIs)"),
 		},
 		{
 			Name:        ToolDescribeAPI,
@@ -264,6 +290,65 @@ func stringProp(description string) mcp.Schema {
 	return mcp.Schema{Type: "string", Description: description}
 }
 
+// exposureUpdateSchema builds the input schema for the two update_*_exposure
+// tools. The first required property is the API name.
+func exposureUpdateSchema(apiKey, apiDesc string) mcp.Schema {
+	return mcp.Schema{
+		Type: "object",
+		Properties: map[string]mcp.Schema{
+			apiKey:            {Type: "string", Description: apiDesc},
+			"active":          boolProp("Whole-API on/off. When false, none of the API's operations are served this session (or globally); they stay discoverable via api_exposure / list_openapi_apis."),
+			"mode":            {Type: "string", Enum: []interface{}{config.ExposureModeAll, config.ExposureModeNone}, Description: "Footprint rule: 'all' serves everything in the allow-set except disabled tags/ops; 'none' serves only the explicitly activated tags/ops. Setting 'all' resets to the full allow-set; 'none' bootstraps the minimal footprint."},
+			"activate_tags":   stringListProp("For mode 'none': force these OpenAPI tag sections on. For mode 'all': remove them from the disabled list (un-hide)."),
+			"activate_ops":    stringListProp("For mode 'none': force these operationIds on. For mode 'all': remove them from the disabled list (un-hide)."),
+			"deactivate_tags": stringListProp("For mode 'all': force these tag sections off. For mode 'none': remove them from the active list."),
+			"deactivate_ops":  stringListProp("For mode 'all': force these operationIds off. For mode 'none': remove them from the active list."),
+		},
+		Required: []string{apiKey},
+	}
+}
+
+// exposurePatchFromArgs parses the mutation arguments shared by the two
+// update_*_exposure tools into an exposurePatch.
+func exposurePatchFromArgs(args map[string]interface{}) exposurePatch {
+	return exposurePatch{
+		active:         boolPtrArg(args, "active"),
+		mode:           strArg(args, "mode"),
+		activateTags:   strSliceArg(args, "activate_tags"),
+		activateOps:    strSliceArg(args, "activate_ops"),
+		deactivateTags: strSliceArg(args, "deactivate_tags"),
+		deactivateOps:  strSliceArg(args, "deactivate_ops"),
+	}
+}
+
+// boolPtrArg returns a pointer to a boolean argument, or nil when absent.
+func boolPtrArg(args map[string]interface{}, key string) *bool {
+	if v, ok := args[key]; ok {
+		b, isBool := v.(bool)
+		if isBool {
+			return &b
+		}
+	}
+	return nil
+}
+
+// exposureConfigFromArgs parses the nested "exposure" object accepted by
+// register_openapi_api into an ExposureConfig (empty when absent).
+func exposureConfigFromArgs(raw interface{}) config.ExposureConfig {
+	m, ok := raw.(map[string]interface{})
+	if !ok {
+		return config.ExposureConfig{}
+	}
+	return config.ExposureConfig{
+		Active:       boolPtrArg(m, "active"),
+		Mode:         strArg(m, "mode"),
+		ActiveTags:   strSliceArg(m, "active_tags"),
+		ActiveOps:    strSliceArg(m, "active_ops"),
+		DisabledTags: strSliceArg(m, "disabled_tags"),
+		DisabledOps:  strSliceArg(m, "disabled_ops"),
+	}
+}
+
 func stringListProp(description string) mcp.Schema {
 	return mcp.Schema{
 		Type:        "array",
@@ -291,11 +376,16 @@ func registerAPISchema() mcp.Schema {
 			"auth_login_operation":   stringProp("operationId (or full <api>__<op> name) of the API's login operation for login/token based auth. Inferred automatically when omitted."),
 			"monitoring_enabled":     {Type: "boolean", Description: "Watch the API's spec source for changes and notify clients when it changes (default false)"},
 			"monitoring_auto_reload": {Type: "boolean", Description: "On spec change, also re-load the API and regenerate its tools (implies monitoring; default false)"},
-			"include_tags":           stringListProp("Only expose operations with these tags"),
-			"exclude_tags":           stringListProp("Exclude operations with these tags"),
-			"include_ops":            stringListProp("Only expose these operation ids"),
-			"exclude_ops":            stringListProp("Exclude these operation ids"),
-			"update":                 {Type: "boolean", Description: "Replace an existing registration with the same name (default false)"},
+			"include_tags":           stringListProp("Allow-set: only expose operations with these tags (the hard boundary; runtime exposure can only act within this)"),
+			"exclude_tags":           stringListProp("Allow-set: exclude operations with these tags"),
+			"include_ops":            stringListProp("Allow-set: only expose these operation ids"),
+			"exclude_ops":            stringListProp("Allow-set: exclude these operation ids"),
+			"exposure": mcp.Schema{
+				Type:        "object",
+				Description: "Runtime tool-footprint baseline: {active? (bool), mode? ('all'|'none'), active_tags?, active_ops?, disabled_tags?, disabled_ops?}. Defaults both to the full allow-set. See api_exposure / update_api_exposure.",
+				Properties:  map[string]mcp.Schema{},
+			},
+			"update": {Type: "boolean", Description: "Replace an existing registration with the same name (default false)"},
 		},
 		Required: []string{"name"},
 	}
@@ -345,6 +435,10 @@ func boolArg(args map[string]interface{}, key string) bool {
 		return v
 	}
 	return false
+}
+
+func boolProp(description string) mcp.Schema {
+	return mcp.Schema{Type: "boolean", Description: description}
 }
 
 func intArg(args map[string]interface{}, key string, def int) int {
@@ -401,6 +495,7 @@ func apiDefinitionFromArgs(args map[string]interface{}) (config.APIDefinition, b
 		ExcludeTags: strSliceArg(args, "exclude_tags"),
 		IncludeOps:  strSliceArg(args, "include_ops"),
 		ExcludeOps:  strSliceArg(args, "exclude_ops"),
+		Exposure:    exposureConfigFromArgs(args["exposure"]),
 		Auth: config.AuthConfig{
 			Type:           strings.ToLower(strArg(args, "auth_type")),
 			In:             strArg(args, "auth_in"),
@@ -473,7 +568,7 @@ func (r *Registry) runManagementTool(connID, name string, args map[string]interf
 			return okResult(fmt.Sprintf("Unregistered API %q (was exposing %d tool(s)).", summary.Name, summary.ToolCount))
 		}
 	case ToolListAPIs:
-		summaries := r.APIs()
+		summaries := r.APIsForSession(connID)
 		body, _ := json.MarshalIndent(summaries, "", "  ")
 		if len(summaries) == 0 {
 			return okResult("No APIs are registered. Use register_openapi_api to add one.")
@@ -550,6 +645,51 @@ func (r *Registry) runManagementTool(connID, name string, args map[string]interf
 			return okResult(fmt.Sprintf("This session targets API %q via %q (override).", api, t))
 		}
 		return okResult(fmt.Sprintf("This session has no active-target override for API %q (using the global active target).", api))
+	case ToolUpdateAPIExposure:
+		api := strArg(args, "api")
+		report, err := r.UpdateAPIExposure(api, exposurePatchFromArgs(args))
+		if err != nil {
+			return errResult(err)
+		}
+		body, _ := json.MarshalIndent(report, "", "  ")
+		return okResult(string(body))
+	case ToolUpdateSessionAPIExposure:
+		api := strArg(args, "api")
+		report, err := r.UpdateSessionAPIExposure(connID, api, exposurePatchFromArgs(args))
+		if err != nil {
+			return errResult(err)
+		}
+		body, _ := json.MarshalIndent(report, "", "  ")
+		return okResult(string(body))
+	case ToolClearSessionAPIExposure:
+		api := strArg(args, "api")
+		if err := r.ClearSessionAPIExposure(connID, api); err != nil {
+			return errResult(err)
+		}
+		return okResult(fmt.Sprintf("Cleared this session's footprint override for API %q (reverted to the global baseline).", api))
+	case ToolAPIExposure:
+		if api := strArg(args, "api"); api != "" {
+			report, err := r.exposureReportForSession(connID, api)
+			if err != nil {
+				return errResult(err)
+			}
+			body, _ := json.MarshalIndent(report, "", "  ")
+			return okResult(string(body))
+		}
+		summaries := r.APIsForSession(connID)
+		rows := make([]map[string]interface{}, 0, len(summaries))
+		for _, s := range summaries {
+			rows = append(rows, map[string]interface{}{
+				"api":              s.Name,
+				"active":           s.Active,
+				"mode":             s.Mode,
+				"exposed_tools":    s.ExposedTools,
+				"tool_count":       s.ToolCount,
+				"session_override": s.SessionOverride,
+			})
+		}
+		body, _ := json.MarshalIndent(map[string]interface{}{"session_override_apis": rows}, "", "  ")
+		return okResult(string(body))
 	case ToolDescribeAPI:
 		api := strArg(args, "api")
 		entry, err := r.GetApiEntryView(api)
@@ -560,6 +700,10 @@ func (r *Registry) runManagementTool(connID, name string, args map[string]interf
 			include: map[string]bool{},
 			search:  strArg(args, "search"),
 			full:    strArg(args, "schema_detail") == "full",
+			sessionActive: func(opID string) bool {
+				live, ok := r.liveEntry(api)
+				return ok && r.opExposedForSession(connID, live, opID)
+			},
 		}
 		for _, inc := range strSliceArg(args, "include") {
 			opts.include[strings.ToLower(inc)] = true
@@ -576,7 +720,11 @@ func (r *Registry) runManagementTool(connID, name string, args map[string]interf
 		if err != nil {
 			return errResult(err)
 		}
-		body, err := describeOperation(entry, opRef, boolArg(args, "examples"))
+		active := func(opID string) bool {
+			live, ok := r.liveEntry(api)
+			return ok && r.opExposedForSession(connID, live, opID)
+		}
+		body, err := describeOperation(entry, opRef, boolArg(args, "examples"), active)
 		if err != nil {
 			return errResult(err)
 		}
@@ -598,7 +746,11 @@ func (r *Registry) runManagementTool(connID, name string, args map[string]interf
 		if err != nil {
 			return errResult(err)
 		}
-		body, err := searchOperations(entry, strArg(args, "query"), strings.ToUpper(strArg(args, "method")))
+		active := func(opID string) bool {
+			live, ok := r.liveEntry(api)
+			return ok && r.opExposedForSession(connID, live, opID)
+		}
+		body, err := searchOperations(entry, strArg(args, "query"), strings.ToUpper(strArg(args, "method")), active)
 		if err != nil {
 			return errResult(err)
 		}
@@ -769,12 +921,14 @@ type endpointView struct {
 	Summary     string   `json:"summary,omitempty"`
 	Description string   `json:"description,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
+	Active      bool     `json:"active,omitempty"`
 }
 
 type describeOpts struct {
-	include map[string]bool // section, when non-empty only these sections render
-	search  string          // endpoint filter
-	full    bool            // schema_detail == full
+	include       map[string]bool        // section, when non-empty only these sections render
+	search        string                 // endpoint filter
+	full          bool                   // schema_detail == full
+	sessionActive func(opID string) bool // per-session exposure marker (nil for unexposed APIs/unknown)
 }
 
 func describeAPIDoc(entry *apiEntryView, opts describeOpts) (string, error) {
@@ -851,6 +1005,7 @@ func describeAPIDoc(entry *apiEntryView, opts describeOpts) (string, error) {
 			Summary:     ep.Summary,
 			Description: ep.Description,
 			Tags:        ep.Tags,
+			Active:      opts.sessionActive != nil && opts.sessionActive(ep.OperationID),
 		})
 		if limit != -1 && len(view.Endpoints) >= limit {
 			break
@@ -878,7 +1033,7 @@ func describeAPIDoc(entry *apiEntryView, opts describeOpts) (string, error) {
 	return string(body), nil
 }
 
-func describeOperation(entry *apiEntryView, opRef string, examples bool) (string, error) {
+func describeOperation(entry *apiEntryView, opRef string, examples bool, active func(opID string) bool) (string, error) {
 	doc := entry.Doc
 	if doc == nil {
 		return "", fmt.Errorf("API %q has no parsed documentation", entry.Def.Name)
@@ -896,6 +1051,12 @@ func describeOperation(entry *apiEntryView, opRef string, examples bool) (string
 	}
 	ep := doc.Endpoints[idx]
 
+	exposed := active != nil && active(ep.OperationID)
+	exposureNote := "exposed"
+	if !exposed {
+		exposureNote = "hidden (not served to this session; enable it with update_session_api_exposure)"
+	}
+
 	view := struct {
 		OperationID string             `json:"operation_id,omitempty"`
 		ToolName    string             `json:"tool_name,omitempty"`
@@ -903,6 +1064,8 @@ func describeOperation(entry *apiEntryView, opRef string, examples bool) (string
 		Path        string             `json:"path"`
 		Summary     string             `json:"summary,omitempty"`
 		Description string             `json:"description,omitempty"`
+		Active      bool               `json:"active"`
+		Exposure    string             `json:"exposure,omitempty"`
 		Parameters  []mcp.ParameterDoc `json:"parameters,omitempty"`
 		RequestBody *mcp.SchemaDoc     `json:"request_body,omitempty"`
 		Responses   []mcp.ResponseDoc  `json:"responses,omitempty"`
@@ -913,6 +1076,8 @@ func describeOperation(entry *apiEntryView, opRef string, examples bool) (string
 		Path:        ep.Path,
 		Summary:     ep.Summary,
 		Description: ep.Description,
+		Active:      exposed,
+		Exposure:    exposureNote,
 		Parameters:  ep.Parameters,
 		RequestBody: ep.RequestBody,
 		Responses:   ep.Responses,
@@ -932,6 +1097,8 @@ func describeOperation(entry *apiEntryView, opRef string, examples bool) (string
 		Path        string                 `json:"path"`
 		Summary     string                 `json:"summary,omitempty"`
 		Description string                 `json:"description,omitempty"`
+		Active      bool                   `json:"active"`
+		Exposure    string                 `json:"exposure,omitempty"`
 		Parameters  []mcp.ParameterDoc     `json:"parameters,omitempty"`
 		RequestBody interface{}            `json:"request_body,omitempty"`
 		Responses   interface{}            `json:"responses,omitempty"`
@@ -944,6 +1111,8 @@ func describeOperation(entry *apiEntryView, opRef string, examples bool) (string
 		Path:        view.Path,
 		Summary:     view.Summary,
 		Description: view.Description,
+		Active:      exposed,
+		Exposure:    exposureNote,
 		Parameters:  ep.Parameters,
 	}
 	we.Examples = operationExamples(doc, ep)
@@ -1035,7 +1204,7 @@ func listAPISchemas(entry *apiEntryView, name string, expand bool, search string
 	return string(body), nil
 }
 
-func searchOperations(entry *apiEntryView, query, method string) (string, error) {
+func searchOperations(entry *apiEntryView, query, method string, active func(opID string) bool) (string, error) {
 	doc := entry.Doc
 	if doc == nil {
 		return "", fmt.Errorf("API %q has no parsed documentation", entry.Def.Name)
@@ -1057,6 +1226,7 @@ func searchOperations(entry *apiEntryView, query, method string) (string, error)
 			Path:        ep.Path,
 			Summary:     ep.Summary,
 			Tags:        ep.Tags,
+			Active:      active != nil && active(ep.OperationID),
 		})
 	}
 	if len(results) == 0 {
@@ -1077,6 +1247,7 @@ func exportConfig(entry *apiEntryView) (string, error) {
 		"registered_at":  entry.RegisteredAt.Format(time.RFC3339),
 		"spec_timestamp": formatSpecTimestamp(entry.SpecTimestamp),
 		"auth":           entry.Def.Auth.Effective(),
+		"exposure":       entry.Def.Exposure,
 		"active_target":  entry.Def.ActiveTarget,
 		"include_tags":   entry.Def.IncludeTags,
 		"exclude_tags":   entry.Def.ExcludeTags,

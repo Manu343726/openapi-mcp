@@ -204,6 +204,30 @@ These are deliberate constraints — the tests and behavior rely on them.
   (pull-rebase/ff_only, pending-push retention) and `knowledge_sync`. The checkout
   lives under the configured `root`; sync state is surfaced by `knowledge_status`.
 
+## Scripting layer (`pkg/script`, `pkg/server/scripts.go`)
+
+- A script is a `kind: script` knowledge doc: `scripts/<id>.tengo` (raw source,
+  optional `// ---` comment front-matter) or `<id>.md` (YAML front-matter + a
+  fenced ```tengo body). It is surfaced as `toolFullName(scope, id)`
+  (`acme__<id>` / `_meta__<id>`) and executed by a tengo VM.
+- **Sandbox**: safe stdlib modules are always available; the host modules
+  `mcp`/`os`/`exec`/`fs`/`http` are default-**deny** and require a `permissions`
+  declaration. `exec`/`fs`/`http` additionally need operator allowlists
+  (`meta.scripting.{exec_allowlist,fs_read_roots,http_allowlist}`); an empty
+  allowlist denies every call. Do not widen this without a test.
+- **Guards**: each run has a wall-clock budget (default 10s via
+  `meta.scripting.default_timeout_s`, overridable per doc with `timeout:`) and a
+  tengo `SetMaxAllocs` allocation cap. The source is wrapped in an IIFE so a
+  top-level `return` is valid.
+- **Dispatch**: scripts are deliberately *not* in the operation index
+  (`ResolveTool` stays operation-only). They live in `Registry.scriptTools` and
+  are resolved with `scriptToolFor`; `RunScript` runs them, `CallTool` is the
+  unified bridge (`mcp.call` reaches management tools, scripts and operations).
+  Never re-derive script names by string surgery.
+- **Exposure**: per-API scripts follow the owning API's runtime exposure, bucketed
+  under the synthetic `script` tag; `_meta__*` scripts are always exposed. The
+  `script_list`/`script_describe` tools inspect them.
+
 ## MCP protocol (`pkg/server/server.go` `dispatchJSONRPC`)
 
 - Standard notifications (including `notifications/cancelled`) are accepted

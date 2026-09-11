@@ -9,9 +9,13 @@
 package knowledge
 
 import (
+	"fmt"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Kind identifies what a document describes.
@@ -32,25 +36,100 @@ const (
 	KindDashboard  Kind = "dashboard" // a saved view or group of views + inputs
 )
 
+// Permissions declares which host modules a kind: script document may import.
+// It accepts either a YAML list (["exec", "fs"]) or a YAML map
+// ({exec: true, fs: false}); only truthy entries are kept. Module names are
+// lower-cased, de-duplicated and sorted so the parsed doc is stable.
+type Permissions []string
+
+// UnmarshalYAML accepts both the list and map encodings.
+func (p *Permissions) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.SequenceNode:
+		var list []string
+		if err := value.Decode(&list); err != nil {
+			return err
+		}
+		*p = normalizePermissions(list)
+	case yaml.MappingNode:
+		var m map[string]bool
+		if err := value.Decode(&m); err != nil {
+			return err
+		}
+		list := make([]string, 0, len(m))
+		for k, v := range m {
+			if v {
+				list = append(list, k)
+			}
+		}
+		*p = normalizePermissions(list)
+	case yaml.ScalarNode:
+		var s string
+		if err := value.Decode(&s); err != nil {
+			return err
+		}
+		*p = normalizePermissions(strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' }))
+	default:
+		return fmt.Errorf("permissions: expected a list or map")
+	}
+	return nil
+}
+
+// Has reports whether the named module was granted.
+func (p Permissions) Has(module string) bool {
+	module = strings.ToLower(strings.TrimSpace(module))
+	for _, m := range p {
+		if m == module {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizePermissions(in []string) Permissions {
+	seen := map[string]bool{}
+	out := make(Permissions, 0, len(in))
+	for _, s := range in {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Doc is a single knowledge document. The YAML front-matter holds the machine
 // part; Body holds the human prose with relative Markdown links.
 type Doc struct {
-	ID          string   `yaml:"id,omitempty"`
-	Kind        Kind     `yaml:"kind,omitempty"`
-	API         string   `yaml:"api,omitempty"`
-	Language    string   `yaml:"language,omitempty"`
-	Summary     string   `yaml:"summary,omitempty"`
-	Anchor      string   `yaml:"anchor,omitempty"`
-	Tags        []string `yaml:"tags,omitempty"`
-	Intents     []string `yaml:"intents,omitempty"`
-	Params      []Param  `yaml:"params,omitempty"`
-	Steps       []Step   `yaml:"steps,omitempty"`
-	Related     []Rel    `yaml:"related,omitempty"`
-	Permissions []string `yaml:"permissions,omitempty"` // required capability scopes for kind: script
-	View        *View    `yaml:"view,omitempty"`        // rendering spec for kind: view/dashboard
-	Draft       bool     `yaml:"draft,omitempty"`
+	ID          string      `yaml:"id,omitempty"`
+	Kind        Kind        `yaml:"kind,omitempty"`
+	API         string      `yaml:"api,omitempty"`
+	Language    string      `yaml:"language,omitempty"`
+	Summary     string      `yaml:"summary,omitempty"`
+	Anchor      string      `yaml:"anchor,omitempty"`
+	Tags        []string    `yaml:"tags,omitempty"`
+	Intents     []string    `yaml:"intents,omitempty"`
+	Params      []Param     `yaml:"params,omitempty"`
+	Steps       []Step      `yaml:"steps,omitempty"`
+	Related     []Rel       `yaml:"related,omitempty"`
+	Permissions Permissions `yaml:"permissions,omitempty"` // host modules a kind: script may import
+	View        *View       `yaml:"view,omitempty"`        // rendering spec for kind: view/dashboard
+	Draft       bool        `yaml:"draft,omitempty"`
+
+	// TimeoutS overrides the scripting default run budget, in seconds, for a
+	// kind: script document (front-matter "timeout").
+	TimeoutS int `yaml:"timeout,omitempty"`
 
 	Body string `yaml:"-"`
+
+	// Source is the executable tengo source of a kind: script document. For a
+	// .tengo file it mirrors Body (the whole file, comment front-matter and
+	// all); for a .md document it is the content of the first tengo fenced code
+	// block, while Body keeps the human prose.
+	Source string `yaml:"-"`
 
 	// Path is the library-relative path of the document (e.g.
 	// "endpoints/create-user.md"). Links use this as the stable target base.
@@ -59,10 +138,15 @@ type Doc struct {
 	Title string `yaml:"-"`
 }
 
-// Param is a free-form parameter a capability task accepts from natural language.
+// Param is a free-form parameter a capability task or script accepts. For
+// scripts the optional Type/Description/Default refine the generated tool
+// schema; capabilities typically only use Name/Required.
 type Param struct {
-	Name     string `yaml:"name"`
-	Required bool   `yaml:"required"`
+	Name        string      `yaml:"name"`
+	Required    bool        `yaml:"required,omitempty"`
+	Type        string      `yaml:"type,omitempty"`        // string|integer|number|boolean|array|object
+	Description string      `yaml:"description,omitempty"` // shown in the tool schema
+	Default     interface{} `yaml:"default,omitempty"`     // default value when omitted
 }
 
 // Step is one executable step of a capability task. Inputs bind task parameters

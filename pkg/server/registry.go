@@ -74,6 +74,17 @@ type apiEntry struct {
 	ToolSet       *mcp.ToolSet // tools keyed by bare operation names
 	Doc           *mcp.ApiDoc  // normalized spec documentation for introspection
 
+	// OpTags maps each bare operation id to its OpenAPI tags. It is built once
+	// at load from the ApiDoc and lets tag-level exposure toggles resolve to
+	// concrete operations without re-parsing the spec.
+	OpTags map[string][]string
+
+	// Exposure is the API's global (persisted) runtime footprint projection,
+	// normalized (defaults Active=true, Mode=all). Per-session overrides live on
+	// the Registry (see sessionExposure); this baseline is what every new session
+	// starts from and what update_api_exposure mutates.
+	Exposure config.ExposureConfig
+
 	// Knowledge is the indexed Markdown knowledge library (nil while unloaded).
 	Knowledge *knowledge.Library
 
@@ -95,18 +106,23 @@ type toolRef struct {
 }
 
 // APISummary is a client-safe view of a registered API and its targets. It never
-// contains credentials.
+// contains credentials. Exposure fields (ExposedTools, Active, Mode,
+// SessionOverride) are annotated for the calling session (see APIsForSession).
 type APISummary struct {
-	Name          string   `json:"name"`
-	Source        string   `json:"source,omitempty"`
-	Title         string   `json:"title,omitempty"`
-	SpecVersion   string   `json:"spec_version,omitempty"`
-	SpecTimestamp string   `json:"spec_timestamp,omitempty"` // spec source last-modified at load (RFC3339)
-	ToolCount     int      `json:"tool_count"`
-	Tools         []string `json:"tools,omitempty"`
-	ActiveTarget  string   `json:"active_target,omitempty"`
-	Targets       []string `json:"targets,omitempty"`
-	RegisteredAt  string   `json:"registered_at,omitempty"`
+	Name            string   `json:"name"`
+	Source          string   `json:"source,omitempty"`
+	Title           string   `json:"title,omitempty"`
+	SpecVersion     string   `json:"spec_version,omitempty"`
+	SpecTimestamp   string   `json:"spec_timestamp,omitempty"` // spec source last-modified at load (RFC3339)
+	ToolCount       int      `json:"tool_count"`
+	ExposedTools    int      `json:"exposed_tools,omitempty"` // session view
+	Active          bool     `json:"active,omitempty"`
+	Mode            string   `json:"mode,omitempty"`
+	SessionOverride bool     `json:"session_override,omitempty"`
+	Tools           []string `json:"tools,omitempty"`
+	ActiveTarget    string   `json:"active_target,omitempty"`
+	Targets         []string `json:"targets,omitempty"`
+	RegisteredAt    string   `json:"registered_at,omitempty"`
 }
 
 // Registry owns the set of registered APIs and their targets. It is safe for
@@ -120,10 +136,21 @@ type Registry struct {
 
 	persistPath string
 	server      config.ServerConfig
+	// scriptTools maps a fully qualified script tool name (<scope>__<id>) to its
+	// runtime ref. Scripts are kind: script knowledge docs; they are resolved
+	// outside the operation index and dispatched by RunScript. Refreshed by
+	// RefreshScripts after a knowledge library load.
+	scriptTools map[string]*scriptRef
 	// sessionTargets maps session (connection) id -> api name -> active target.
 	// A per-session active target overrides the global one for that session only,
 	// and is cleared when the session disconnects.
 	sessionTargets map[string]map[string]string
+
+	// sessionExposure holds per-connection runtime footprint overrides:
+	// connection -> api name -> exposure. A session override narrows/widens the
+	// API's global baseline *within* the API's allow-set, only for that session,
+	// and is cleared when the session disconnects.
+	sessionExposure map[string]map[string]config.ExposureConfig
 
 	// sessionKnowledge is the per-connection knowledge overlay: connection ->
 	// api -> document id -> doc. It lets the agent extend knowledge during a
@@ -153,7 +180,9 @@ func NewRegistry(persistPath string) *Registry {
 		apis:             make(map[string]*apiEntry),
 		index:            make(map[string]*toolRef),
 		persistPath:      persistPath,
+		scriptTools:      make(map[string]*scriptRef),
 		sessionTargets:   make(map[string]map[string]string),
+		sessionExposure:  make(map[string]map[string]config.ExposureConfig),
 		sessionKnowledge: make(map[string]map[string]map[string]*knowledge.Doc),
 		sessionTraces:    make(map[string][]knowledgeTrace),
 	}
@@ -321,17 +350,202 @@ func (r *Registry) rebuild(apis map[string]*apiEntry) ([]mcp.Tool, map[string]*t
 
 	for _, apiName := range names {
 		api := apis[apiName]
+		if api.ToolSet == nil {
+			// Knowledge-only / synthetic entries carry no operation surface.
+			continue
+		}
 		for _, tool := range api.ToolSet.Tools {
 			fullName := toolFullName(apiName, tool.Name)
 			if owner, exists := used[fullName]; exists {
 				return nil, nil, fmt.Errorf("tool name collision: API %q operation %q maps to tool %q already exposed by %s", apiName, tool.Name, fullName, owner)
 			}
 			used[fullName] = fmt.Sprintf("API %q", apiName)
+			// The index keeps EVERY tool (exposed or not): introspection and the
+			// call-time gate need the full surface, and ResolveTool stays global.
 			index[fullName] = &toolRef{api: api, tool: tool}
-			tools = append(tools, exposeTool(api, tool, fullName))
+			// The snapshot is the global baseline: only tools the API's baseline
+			// exposure actually serves. Sessions without an override see this;
+			// per-session views are filtered on the way out (ToolsForSession).
+			if r.opExposedLocked(api, api.Exposure, tool.Name) {
+				tools = append(tools, exposeTool(api, tool, fullName))
+			}
+		}
+	}
+
+	// Script tools (kind: script knowledge docs). They are checked against the
+	// same name space but are not added to the operation index: ResolveTool is
+	// operation-only, and scripts are dispatched by RunScript.
+	scriptNames := make([]string, 0, len(r.scriptTools))
+	for name := range r.scriptTools {
+		scriptNames = append(scriptNames, name)
+	}
+	sort.Strings(scriptNames)
+	for _, fullName := range scriptNames {
+		ref := r.scriptTools[fullName]
+		if owner, exists := used[fullName]; exists {
+			return nil, nil, fmt.Errorf("tool name collision: script %q maps to tool %q already exposed by %s", ref.doc.ID, fullName, owner)
+		}
+		used[fullName] = fmt.Sprintf("script %q", ref.doc.ID)
+		if r.scriptExposedLocked(ref, "") {
+			tools = append(tools, exposeScriptTool(ref, fullName))
 		}
 	}
 	return tools, index, nil
+}
+
+// --- Exposure evaluation ---
+//
+// Every operation passes two gates:
+//   1. The API's allow-set (IncludeTags/ExcludeTags/IncludeOps/ExcludeOps), the
+//      hard boundary no runtime activation may cross. It mirrors the historical
+//      (destructive) parser filtering; filtering now happens here, non-destructively.
+//   2. A runtime exposure projection, either the API's global baseline
+//      (apiEntry.Exposure, mutated by update_api_exposure) or a per-session
+//      override (update_session_api_exposure). Both act strictly within the
+//      allow-set.
+
+// allowSetAllows reports whether an operation passes the API's allow-set
+// boundary (the re-interpretation of include/exclude config).
+func allowSetAllows(opID string, opTags []string, def *config.APIDefinition) bool {
+	if len(def.ExcludeOps) > 0 && opID != "" && sliceContains(def.ExcludeOps, opID) {
+		return false
+	}
+	if len(def.ExcludeTags) > 0 {
+		for _, tag := range opTags {
+			if sliceContains(def.ExcludeTags, tag) {
+				return false
+			}
+		}
+	}
+	hasInclusion := len(def.IncludeOps) > 0 || len(def.IncludeTags) > 0
+	if !hasInclusion {
+		return true
+	}
+	if len(def.IncludeOps) > 0 {
+		if opID != "" && sliceContains(def.IncludeOps, opID) {
+			return true
+		}
+	} else if len(def.IncludeTags) > 0 {
+		for _, tag := range opTags {
+			if sliceContains(def.IncludeTags, tag) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// exposureExposesOp applies an exposure projection to a single operation.
+func exposureExposesOp(ex config.ExposureConfig, opID string, opTags []string) bool {
+	if !ex.ActiveEnabled() {
+		return false
+	}
+	if ex.Mode == config.ExposureModeNone {
+		if sliceContains(ex.ActiveOps, opID) {
+			return true
+		}
+		for _, tag := range opTags {
+			if sliceContains(ex.ActiveTags, tag) {
+				return true
+			}
+		}
+		return false
+	}
+	// Mode "all": everything allowed except the disabled lists.
+	if sliceContains(ex.DisabledOps, opID) {
+		return false
+	}
+	for _, tag := range opTags {
+		if sliceContains(ex.DisabledTags, tag) {
+			return false
+		}
+	}
+	return true
+}
+
+// opExposedLocked evaluates allow-set x exposure for one API's operation.
+// Callers must hold r.mu (or the API be otherwise immutable).
+func (r *Registry) opExposedLocked(api *apiEntry, ex config.ExposureConfig, opID string) bool {
+	if api.Def.Name == metaAPIName {
+		return true
+	}
+	if !allowSetAllows(opID, api.OpTags[opID], &api.Def) {
+		return false
+	}
+	return exposureExposesOp(ex.NormalizeDefaults(), opID, api.OpTags[opID])
+}
+
+// opExposedForSession evaluates whether an API operation is exposed for a
+// session (applying the session override on top of the global baseline).
+func (r *Registry) opExposedForSession(connID string, api *apiEntry, opID string) bool {
+	if api.Def.Name == metaAPIName {
+		return true
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if override, ok := r.sessionExposure[connID][api.Def.Name]; ok {
+		return r.opExposedLocked(api, override, opID)
+	}
+	return r.opExposedLocked(api, api.Exposure, opID)
+}
+
+// exposedCountLocked counts the operations of an API that are exposed for the
+// session under the given (session-effective) exposure. Callers hold r.mu.
+func (r *Registry) exposedCountLocked(entry *apiEntry, ex config.ExposureConfig) int {
+	n := 0
+	if entry.ToolSet != nil {
+		for _, tool := range entry.ToolSet.Tools {
+			if r.opExposedLocked(entry, ex, tool.Name) {
+				n++
+			}
+		}
+	}
+	for _, sref := range r.scriptsForScopeLocked(entry.Def.Name) {
+		if exposureExposesOp(ex.NormalizeDefaults(), sref.doc.ID, []string{scriptTag}) {
+			n++
+		}
+	}
+	return n
+}
+
+// opTagsFromDoc builds the operationId -> tags map from a parsed ApiDoc.
+func opTagsFromDoc(doc *mcp.ApiDoc) map[string][]string {
+	out := make(map[string][]string)
+	if doc == nil {
+		return out
+	}
+	for _, ep := range doc.Endpoints {
+		if ep.OperationID != "" {
+			out[ep.OperationID] = ep.Tags
+		}
+	}
+	return out
+}
+
+// opStatusForSession classifies an operation for a session report:
+// "exposed", "hidden", "session-hidden" or "excluded-by-config".
+func (r *Registry) opStatusForSession(connID string, api *apiEntry, opID string) string {
+	if !allowSetAllows(opID, api.OpTags[opID], &api.Def) {
+		return "excluded-by-config"
+	}
+	r.mu.RLock()
+	override, hasOverride := r.sessionExposure[connID][api.Def.Name]
+	r.mu.RUnlock()
+	baseExposed := exposureExposesOp(api.Exposure.NormalizeDefaults(), opID, api.OpTags[opID])
+	if hasOverride {
+		ov := override.NormalizeDefaults()
+		if baseExposed && !exposureExposesOp(ov, opID, api.OpTags[opID]) {
+			return "session-hidden"
+		}
+		if exposureExposesOp(ov, opID, api.OpTags[opID]) {
+			return "exposed"
+		}
+		return "hidden"
+	}
+	if baseExposed {
+		return "exposed"
+	}
+	return "hidden"
 }
 
 // exposeTool returns the client-facing copy of a tool for a given API. The tool
@@ -723,6 +937,8 @@ func (r *Registry) newEntry(def config.APIDefinition) (*apiEntry, error) {
 		SpecTimestamp: specTimestampFor(def),
 		ToolSet:       toolSet,
 		Doc:           doc,
+		OpTags:        opTagsFromDoc(doc),
+		Exposure:      def.Exposure.NormalizeDefaults(),
 		loginTokens:   make(map[string]*tokenCacheEntry),
 	}, nil
 }
@@ -782,6 +998,7 @@ func (r *Registry) registerParsedAPI(def config.APIDefinition, toolSet *mcp.Tool
 	if def.Source != "" {
 		title = fmt.Sprintf("%s (%s)", toolSet.Name, def.Source)
 	}
+	doc := parser.BuildApiDoc(nil, version, toolSet)
 	entry := &apiEntry{
 		Def:           def,
 		SpecTitle:     title,
@@ -789,7 +1006,9 @@ func (r *Registry) registerParsedAPI(def config.APIDefinition, toolSet *mcp.Tool
 		RegisteredAt:  time.Now().UTC(),
 		SpecTimestamp: specTimestampFor(def),
 		ToolSet:       toolSet,
-		Doc:           parser.BuildApiDoc(nil, version, toolSet),
+		Doc:           doc,
+		OpTags:        opTagsFromDoc(doc),
+		Exposure:      def.Exposure.NormalizeDefaults(),
 		loginTokens:   make(map[string]*tokenCacheEntry),
 	}
 	return r.registerEntry(entry, replace)
@@ -855,6 +1074,8 @@ func (r *Registry) UnregisterAPI(name string) (*APISummary, error) {
 
 	apis := r.cloneAPIs()
 	delete(apis, name)
+	r.apis = apis
+	r.refreshScriptsLocked()
 	tools, index, err := r.rebuild(apis)
 	if err != nil {
 		return nil, err
@@ -862,13 +1083,21 @@ func (r *Registry) UnregisterAPI(name string) (*APISummary, error) {
 	if err := r.persist(apis); err != nil {
 		return nil, err
 	}
-	r.apis, r.tools, r.index = apis, tools, index
+	r.tools, r.index = tools, index
 	r.notifyToolsListChanged()
 	return &summary, nil
 }
 
-// APIs lists the registered APIs, sorted by name.
+// APIs lists the registered APIs, sorted by name, with exposure annotated for
+// the calling session.
 func (r *Registry) APIs() []APISummary {
+	return r.APIsForSession("")
+}
+
+// APIsForSession lists the registered APIs with the runtime footprint annotated
+// as seen by the given connection (see APISummary). The global baseline is
+// reported alongside the session view where it differs.
+func (r *Registry) APIsForSession(connID string) []APISummary {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	names := make([]string, 0, len(r.apis))
@@ -878,7 +1107,25 @@ func (r *Registry) APIs() []APISummary {
 	sort.Strings(names)
 	out := make([]APISummary, 0, len(names))
 	for _, name := range names {
-		out = append(out, apiSummary(r.apis[name]))
+		entry := r.apis[name]
+		sum := apiSummary(entry)
+		// Surface the API's kind: script tools alongside its operations.
+		for _, sref := range r.scriptsForScopeLocked(name) {
+			sum.Tools = append(sum.Tools, toolFullName(name, sref.doc.ID))
+		}
+		sum.ToolCount = len(sum.Tools)
+		sum.ExposedTools = r.exposedCountLocked(entry, entry.Exposure)
+		override, has := r.sessionExposureFor(connID, name)
+		if has {
+			sum.Active = override.ActiveEnabled()
+			sum.Mode = override.Mode
+			sum.SessionOverride = true
+			sum.ExposedTools = r.exposedCountLocked(entry, override)
+		} else {
+			sum.Active = entry.Exposure.ActiveEnabled()
+			sum.Mode = entry.Exposure.Mode
+		}
+		out = append(out, sum)
 	}
 	return out
 }
@@ -892,6 +1139,14 @@ func (r *Registry) GetAPI(name string) (APISummary, bool) {
 		return APISummary{}, false
 	}
 	return apiSummary(entry), true
+}
+
+// liveEntry returns the mutable apiEntry for an API (no side effects; unlike
+// apiEntryFor it does not trigger knowledge loading). Safe to call concurrently;
+// the returned pointer is only valid while the caller holds r.mu.
+func (r *Registry) liveEntry(name string) (*apiEntry, bool) {
+	entry, ok := r.apis[name]
+	return entry, ok
 }
 
 // apiEntryView is a read-only snapshot of an apiEntry used by the
@@ -1122,6 +1377,399 @@ func (r *Registry) IsManagementTool(name string) bool {
 	return ok
 }
 
+// --- Dynamic exposure (runtime tool footprint) ---
+
+// ToolsForSession returns the tools served to a specific connection. It is the
+// global baseline (Tools) unless the session carries a footprint override for
+// some API, in which case that session's view is computed: the management tools
+// always, then each API's allowed operations filtered by the session-effective
+// exposure. Sessions without state are handed the precomputed global snapshot.
+func (r *Registry) ToolsForSession(connID string) []mcp.Tool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, hasOverride := r.sessionExposure[connID]
+	if !hasOverride {
+		out := make([]mcp.Tool, len(r.tools))
+		copy(out, r.tools)
+		return out
+	}
+	names := make([]string, 0, len(r.apis))
+	for name := range r.apis {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	tools := make([]mcp.Tool, 0, len(r.tools)+16)
+	tools = append(tools, managementTools...)
+	for _, apiName := range names {
+		api := r.apis[apiName]
+		ex := api.Exposure
+		if override, ok := r.sessionExposure[connID][apiName]; ok {
+			ex = override
+		}
+		for _, tool := range api.ToolSet.Tools {
+			if r.opExposedLocked(api, ex, tool.Name) {
+				tools = append(tools, exposeTool(api, tool, toolFullName(apiName, tool.Name)))
+			}
+		}
+	}
+	tools = r.appendScriptsLocked(tools, connID)
+	return tools
+}
+
+// IsToolExposedForSession reports whether a fully qualified operation tool is
+// exposed to the given session. Management tools and the meta scope are always
+// exposed. The name is resolved through the index (never by string surgery), so
+// truncated names are handled correctly.
+func (r *Registry) IsToolExposedForSession(connID, fullName string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if ref, ok := r.scriptTools[fullName]; ok {
+		return r.scriptExposedLocked(ref, connID)
+	}
+	ref, ok := r.index[fullName]
+	if !ok {
+		return true // management tool or unknown: the caller gates that separately
+	}
+	if override, ok := r.sessionExposure[connID][ref.api.Def.Name]; ok {
+		return r.opExposedLocked(ref.api, override, ref.tool.Name)
+	}
+	return r.opExposedLocked(ref.api, ref.api.Exposure, ref.tool.Name)
+}
+
+// exposeActivationHint renders the "how do I turn this back on" guidance for a
+// tool that is registered but hidden. It must not be called for unknown names.
+func exposeActivationHint(fullName, apiName string) string {
+	return fmt.Sprintf("tool %q is registered but not exposed in this session; enable it with update_session_api_exposure {api:%q, activate_ops:[\"%s\"]} (or update_api_exposure to change it for everyone)", fullName, apiName, trimToolPrefix(apiName, fullName))
+}
+
+// trimToolPrefix strips "<api>__" from a fully qualified tool name. Used only
+// for rendering errors/hints; lookups always go through the index.
+func trimToolPrefix(apiName, fullName string) string {
+	prefix := apiName + toolNameSep
+	if strings.HasPrefix(fullName, prefix) {
+		return strings.TrimPrefix(fullName, prefix)
+	}
+	return fullName
+}
+
+// sessionExposureFor returns the session override for an API, if any.
+func (r *Registry) sessionExposureFor(connID, apiName string) (config.ExposureConfig, bool) {
+	if m, ok := r.sessionExposure[connID]; ok {
+		if ex, ok2 := m[apiName]; ok2 {
+			return ex, true
+		}
+	}
+	return config.ExposureConfig{}, false
+}
+
+// UpdateAPIExposure mutates the global exposure baseline of an API (persisted),
+// rebuilds the snapshot, persists and broadcasts tools/list_changed. Sessions
+// without their own override pick up the change; sessions with an override keep
+// theirs (the allow-set is the only hard boundary).
+func (r *Registry) UpdateAPIExposure(apiName string, patch exposurePatch) (map[string]interface{}, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, exists := r.apis[apiName]
+	if !exists {
+		return nil, fmt.Errorf("API %q is not registered", apiName)
+	}
+	ex := entry.Exposure
+	patch.apply(&ex)
+	def := entry.Def
+	def.Exposure = ex
+	entry.Def = def
+	entry.Exposure = ex
+	tools, index, err := r.rebuild(r.apis)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.persist(r.apis); err != nil {
+		return nil, err
+	}
+	r.tools, r.index = tools, index
+	r.notifyToolsListChanged()
+	return r.exposureReportForLocked(entry, ex), nil
+}
+
+// UpdateSessionAPIExposure sets (or merges into) the calling connection's
+// per-session footprint override for an API. It is never persisted and dies with
+// the connection.
+func (r *Registry) UpdateSessionAPIExposure(connID, apiName string, patch exposurePatch) (map[string]interface{}, error) {
+	if connID == "" {
+		return nil, fmt.Errorf("session id is required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, exists := r.apis[apiName]
+	if !exists {
+		return nil, fmt.Errorf("API %q is not registered", apiName)
+	}
+	ex := entry.Exposure
+	if override, ok := r.sessionExposureFor(connID, apiName); ok {
+		ex = override
+	}
+	patch.apply(&ex)
+	if r.sessionExposure[connID] == nil {
+		r.sessionExposure[connID] = map[string]config.ExposureConfig{}
+	}
+	r.sessionExposure[connID][apiName] = ex.NormalizeDefaults()
+	r.notifyToolsListChanged()
+	return r.exposureReportForLocked(entry, ex), nil
+}
+
+// ClearSessionAPIExposure drops this connection's override for an API, reverting
+// to the global baseline.
+func (r *Registry) ClearSessionAPIExposure(connID, apiName string) error {
+	if connID == "" {
+		return fmt.Errorf("session id is required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.apis[apiName]; !exists {
+		return fmt.Errorf("API %q is not registered", apiName)
+	}
+	if m, ok := r.sessionExposure[connID]; ok {
+		delete(m, apiName)
+		if len(m) == 0 {
+			delete(r.sessionExposure, connID)
+		}
+	}
+	r.notifyToolsListChanged()
+	return nil
+}
+
+// exposureReport builds the api_exposure report for one API: the global baseline
+// plus the session-effective projection and per-operation statuses.
+func (r *Registry) exposureReportForSession(connID, apiName string) (map[string]interface{}, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	entry, exists := r.apis[apiName]
+	if !exists {
+		return nil, fmt.Errorf("API %q is not registered", apiName)
+	}
+	override, hasOverride := r.sessionExposureFor(connID, apiName)
+	effective := entry.Exposure
+	if hasOverride {
+		effective = override
+	}
+	return r.exposureReportLocked(entry, effective, hasOverride), nil
+}
+
+// exposureReportLocked computes an api_exposure report. Callers hold r.mu.
+func (r *Registry) exposureReportLocked(entry *apiEntry, effective config.ExposureConfig, hasOverride bool) map[string]interface{} {
+	total, excluded, exposed := 0, 0, 0
+	ops := make([]map[string]interface{}, 0, len(entry.ToolSet.Tools))
+	tagSet := map[string]int{}
+	if entry.ToolSet != nil {
+		for _, tool := range entry.ToolSet.Tools {
+			opID := tool.Name
+			total++
+			status := r.opStatusForSessionLocked(entry, effective, opID)
+			switch status {
+			case "excluded-by-config":
+				excluded++
+			case "exposed":
+				exposed++
+			}
+			for _, tag := range entry.OpTags[opID] {
+				tagSet[tag]++
+			}
+			ops = append(ops, map[string]interface{}{
+				"operation_id": opID,
+				"tool":         toolFullName(entry.Def.Name, opID),
+				"tags":         entry.OpTags[opID],
+				"status":       status,
+				"kind":         "operation",
+			})
+		}
+	}
+	// Scripts share the API's footprint and are bucketed under the synthetic
+	// "script" tag; they are not subject to the spec allow-set.
+	for _, sref := range r.scriptsForScopeLocked(entry.Def.Name) {
+		opID := sref.doc.ID
+		total++
+		status := "hidden"
+		if exposureExposesOp(effective.NormalizeDefaults(), opID, []string{scriptTag}) {
+			status = "exposed"
+			exposed++
+		}
+		tagSet[scriptTag]++
+		ops = append(ops, map[string]interface{}{
+			"operation_id": opID,
+			"tool":         toolFullName(entry.Def.Name, opID),
+			"tags":         []string{scriptTag},
+			"status":       status,
+			"kind":         "script",
+		})
+	}
+	sort.Slice(ops, func(i, j int) bool { return ops[i]["operation_id"].(string) < ops[j]["operation_id"].(string) })
+	global := map[string]interface{}{
+		"active":        entry.Exposure.ActiveEnabled(),
+		"mode":          entry.Exposure.Mode,
+		"active_tags":   entry.Exposure.ActiveTags,
+		"active_ops":    entry.Exposure.ActiveOps,
+		"disabled_tags": entry.Exposure.DisabledTags,
+		"disabled_ops":  entry.Exposure.DisabledOps,
+	}
+	var session map[string]interface{}
+	if hasOverride {
+		session = map[string]interface{}{
+			"active":        effective.ActiveEnabled(),
+			"mode":          effective.Mode,
+			"active_tags":   effective.ActiveTags,
+			"active_ops":    effective.ActiveOps,
+			"disabled_tags": effective.DisabledTags,
+			"disabled_ops":  effective.DisabledOps,
+		}
+	}
+	tags := make([]map[string]interface{}, 0, len(tagSet))
+	tagNames := make([]string, 0, len(tagSet))
+	for t := range tagSet {
+		tagNames = append(tagNames, t)
+	}
+	sort.Strings(tagNames)
+	for _, t := range tagNames {
+		tags = append(tags, map[string]interface{}{"tag": t, "operations": tagSet[t]})
+	}
+	return map[string]interface{}{
+		"api":              entry.Def.Name,
+		"active":           effective.ActiveEnabled(),
+		"mode":             effective.Mode,
+		"session_override": hasOverride,
+		"global":           global,
+		"session":          session,
+		"totals":           map[string]interface{}{"allowed": total - excluded, "exposed": exposed, "excluded_by_config": excluded, "total": total},
+		"tags":             tags,
+		"operations":       ops,
+	}
+}
+
+// opStatusForSessionLocked is the locked variant of opStatusForSession; the
+// effective exposure is passed in (already session-composed). Callers hold r.mu.
+func (r *Registry) opStatusForSessionLocked(entry *apiEntry, effective config.ExposureConfig, opID string) string {
+	if !allowSetAllows(opID, entry.OpTags[opID], &entry.Def) {
+		return "excluded-by-config"
+	}
+	if exposureExposesOp(effective.NormalizeDefaults(), opID, entry.OpTags[opID]) {
+		return "exposed"
+	}
+	return "hidden"
+}
+
+// exposureReportForLocked is the mutating-tool variant: it renders the report
+// for an API given a (just-applied) exposure. Callers hold r.mu.
+func (r *Registry) exposureReportForLocked(entry *apiEntry, ex config.ExposureConfig) map[string]interface{} {
+	ex = ex.NormalizeDefaults()
+	total, allowed, exposed := 0, 0, 0
+	if entry.ToolSet != nil {
+		for _, tool := range entry.ToolSet.Tools {
+			total++
+			if !allowSetAllows(tool.Name, entry.OpTags[tool.Name], &entry.Def) {
+				continue
+			}
+			allowed++
+			if exposureExposesOp(ex, tool.Name, entry.OpTags[tool.Name]) {
+				exposed++
+			}
+		}
+	}
+	// Scripts count toward the footprint (bucketed under the "script" tag) and
+	// are always "allowed" (the allow-set does not apply to them).
+	for _, sref := range r.scriptsForScopeLocked(entry.Def.Name) {
+		total++
+		allowed++
+		if exposureExposesOp(ex, sref.doc.ID, []string{scriptTag}) {
+			exposed++
+		}
+	}
+	return map[string]interface{}{
+		"api":            entry.Def.Name,
+		"active":         ex.ActiveEnabled(),
+		"mode":           ex.Mode,
+		"session_global": false,
+		"totals": map[string]interface{}{
+			"total":              total,
+			"allowed":            allowed,
+			"exposed":            exposed,
+			"excluded_by_config": total - allowed,
+		},
+	}
+}
+
+// sliceContains reports whether a string slice contains a value.
+func sliceContains(hay []string, needle string) bool {
+	for _, v := range hay {
+		if v == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// appendUnique appends value to list when not already present.
+func appendUnique(list []string, value string) []string {
+	if sliceContains(list, value) {
+		return list
+	}
+	return append(list, value)
+}
+
+// removeString returns list without value.
+func removeString(list []string, value string) []string {
+	out := list[:0]
+	for _, v := range list {
+		if v != value {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// exposurePatch carries the optional fields of an exposure mutation. Nil/false
+// fields are left untouched. activate_* force-on (and clear any force-off for
+// the same item); deactivate_* force-off (and clear any force-on). An explicit
+// mode: "all" resets to the full allow-set (active lists become irrelevant),
+// mode: "none" bootstraps the minimal footprint (disabled lists are cleared).
+type exposurePatch struct {
+	active         *bool
+	mode           string
+	activateTags   []string
+	activateOps    []string
+	deactivateTags []string
+	deactivateOps  []string
+}
+
+func (p exposurePatch) apply(ex *config.ExposureConfig) {
+	if p.active != nil {
+		ex.Active = p.active
+	}
+	if p.mode != "" {
+		switch p.mode {
+		case config.ExposureModeAll:
+			ex.ActiveTags, ex.ActiveOps = nil, nil
+		case config.ExposureModeNone:
+			ex.DisabledTags, ex.DisabledOps = nil, nil
+		}
+		ex.Mode = p.mode
+	}
+	for _, t := range p.activateTags {
+		ex.ActiveTags = appendUnique(ex.ActiveTags, t)
+		ex.DisabledTags = removeString(ex.DisabledTags, t)
+	}
+	for _, o := range p.activateOps {
+		ex.ActiveOps = appendUnique(ex.ActiveOps, o)
+		ex.DisabledOps = removeString(ex.DisabledOps, o)
+	}
+	for _, t := range p.deactivateTags {
+		ex.DisabledTags = appendUnique(ex.DisabledTags, t)
+		ex.ActiveTags = removeString(ex.ActiveTags, t)
+	}
+	for _, o := range p.deactivateOps {
+		ex.DisabledOps = appendUnique(ex.DisabledOps, o)
+		ex.ActiveOps = removeString(ex.ActiveOps, o)
+	}
+}
+
 // --- Target lifecycle (exported) ---
 
 // AddTarget registers a target on an existing API. When replace is true an
@@ -1343,6 +1991,7 @@ func (r *Registry) DropSession(connID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.sessionTargets, connID)
+	delete(r.sessionExposure, connID)
 	delete(r.sessionKnowledge, connID)
 	delete(r.sessionTraces, connID)
 }

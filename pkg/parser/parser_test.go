@@ -784,77 +784,84 @@ func TestGenerateToolSet(t *testing.T) {
 				},
 			},
 		},
-		// --- Filtering Tests (Using Complex Specs) ---
+		// --- Filtering moved to the runtime allow-set (registry) ---
+		//
+		// The parser is deliberately non-destructive: it always generates the
+		// FULL toolset for the spec regardless of include/exclude config. The
+		// include/exclude/allow-set semantics now live in the registry's
+		// exposure layer (allowSetAllows / exposure tools), which narrows the
+		// *served* footprint without dropping indexed operations. These cases
+		// pin that the whole spec surface survives parsing.
 		{
-			name:        "V3 Complex - Include Tag1",
+			name:        "V3 Complex - filters do not drop operations",
 			spec:        specComplexV3,
 			version:     VersionV3,
 			cfg:         &config.Config{IncludeTags: []string{"tag1"}},
 			expectError: false,
 			expectedToolSet: &mcp.ToolSet{
-				Name: "Complex V3 API", Description: "", // Should only include listItems and createItem
-				Tools:      []mcp.Tool{{Name: "listItems"}, {Name: "createItem"}},             // Simplified for length check
-				Operations: map[string]mcp.OperationDetail{"listItems": {}, "createItem": {}}, // Simplified for length check
+				Name:       "Complex V3 API",
+				Tools:      []mcp.Tool{{Name: "listItems"}, {Name: "createItem"}, {Name: "getPing"}, {Name: "listUsers"}},
+				Operations: map[string]mcp.OperationDetail{"listItems": {}, "createItem": {}, "getPing": {}, "listUsers": {}},
 			},
 		},
 		{
-			name:        "V3 Complex - Exclude Tag2",
+			name:        "V3 Complex - filters do not drop operations (exclude)",
 			spec:        specComplexV3,
 			version:     VersionV3,
 			cfg:         &config.Config{ExcludeTags: []string{"tag2"}},
 			expectError: false,
 			expectedToolSet: &mcp.ToolSet{
-				Name: "Complex V3 API", Description: "", // Should include listItems and getPing
-				Tools:      []mcp.Tool{{Name: "listItems"}, {Name: "getPing"}},             // Simplified for length check
-				Operations: map[string]mcp.OperationDetail{"listItems": {}, "getPing": {}}, // Simplified for length check
+				Name:       "Complex V3 API",
+				Tools:      []mcp.Tool{{Name: "listItems"}, {Name: "createItem"}, {Name: "getPing"}, {Name: "listUsers"}},
+				Operations: map[string]mcp.OperationDetail{"listItems": {}, "createItem": {}, "getPing": {}, "listUsers": {}},
 			},
 		},
 		{
-			name:        "V3 Complex - Include Operation listItems",
+			name:        "V3 Complex - filters do not drop operations (allow-set)",
 			spec:        specComplexV3,
 			version:     VersionV3,
 			cfg:         &config.Config{IncludeOperations: []string{"listItems"}},
 			expectError: false,
 			expectedToolSet: &mcp.ToolSet{
-				Name: "Complex V3 API", Description: "", // Should include only listItems
-				Tools:      []mcp.Tool{{Name: "listItems"}},                 // Simplified for length check
-				Operations: map[string]mcp.OperationDetail{"listItems": {}}, // Simplified for length check
+				Name:       "Complex V3 API",
+				Tools:      []mcp.Tool{{Name: "listItems"}, {Name: "createItem"}, {Name: "getPing"}, {Name: "listUsers"}},
+				Operations: map[string]mcp.OperationDetail{"listItems": {}, "createItem": {}, "getPing": {}, "listUsers": {}},
 			},
 		},
 		{
-			name:        "V3 Complex - Exclude Operation createItem, getPing",
+			name:        "V3 Complex - filters do not drop operations (exclude ops)",
 			spec:        specComplexV3,
 			version:     VersionV3,
 			cfg:         &config.Config{ExcludeOperations: []string{"createItem", "getPing"}},
 			expectError: false,
 			expectedToolSet: &mcp.ToolSet{
-				Name: "Complex V3 API", Description: "", // Should include listItems and listUsers
-				Tools:      []mcp.Tool{{Name: "listItems"}, {Name: "listUsers"}},             // Simplified for length check
-				Operations: map[string]mcp.OperationDetail{"listItems": {}, "listUsers": {}}, // Simplified for length check
+				Name:       "Complex V3 API",
+				Tools:      []mcp.Tool{{Name: "listItems"}, {Name: "createItem"}, {Name: "getPing"}, {Name: "listUsers"}},
+				Operations: map[string]mcp.OperationDetail{"listItems": {}, "createItem": {}, "getPing": {}, "listUsers": {}},
 			},
 		},
 		{
-			name:        "V2 Complex - Include Tag1",
+			name:        "V2 Complex - filters do not drop operations",
 			spec:        specComplexV2,
 			version:     VersionV2,
 			cfg:         &config.Config{IncludeTags: []string{"tag1"}},
 			expectError: false,
 			expectedToolSet: &mcp.ToolSet{
-				Name: "Complex V2 API", Description: "", // Should only include listItems and createItem
-				Tools:      []mcp.Tool{{Name: "listItems"}, {Name: "createItem"}},             // Simplified for length check
-				Operations: map[string]mcp.OperationDetail{"listItems": {}, "createItem": {}}, // Simplified for length check
+				Name:       "Complex V2 API",
+				Tools:      []mcp.Tool{{Name: "listItems"}, {Name: "createItem"}, {Name: "getPing"}, {Name: "listUsers"}},
+				Operations: map[string]mcp.OperationDetail{"listItems": {}, "createItem": {}, "getPing": {}, "listUsers": {}},
 			},
 		},
 		{
-			name:        "V2 Complex - Exclude Tag2",
+			name:        "V2 Complex - filters do not drop operations (exclude)",
 			spec:        specComplexV2,
 			version:     VersionV2,
 			cfg:         &config.Config{ExcludeTags: []string{"tag2"}},
 			expectError: false,
 			expectedToolSet: &mcp.ToolSet{
-				Name: "Complex V2 API", Description: "", // Should include listItems and getPing
-				Tools:      []mcp.Tool{{Name: "listItems"}, {Name: "getPing"}},             // Simplified for length check
-				Operations: map[string]mcp.OperationDetail{"listItems": {}, "getPing": {}}, // Simplified for length check
+				Name:       "Complex V2 API",
+				Tools:      []mcp.Tool{{Name: "listItems"}, {Name: "createItem"}, {Name: "getPing"}, {Name: "listUsers"}},
+				Operations: map[string]mcp.OperationDetail{"listItems": {}, "createItem": {}, "getPing": {}, "listUsers": {}},
 			},
 		},
 		// --- Parameter/Schema Tests ---

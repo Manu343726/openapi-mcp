@@ -119,6 +119,10 @@ func (r *Registry) loadLibrary(entry *apiEntry) error {
 	r.mu.Lock()
 	entry.Knowledge = lib
 	r.mu.Unlock()
+	// A (re)loaded library may add/remove kind: script tools; republish.
+	if err := r.RefreshScripts(); err != nil {
+		return fmt.Errorf("API %q: refreshing script tools: %w", entry.Def.Name, err)
+	}
 	return nil
 }
 
@@ -233,6 +237,9 @@ func (r *Registry) metaEntryFor() (*apiEntry, error) {
 		r.metaLibrary = entry.Knowledge
 	}
 	r.mu.Unlock()
+	if err := r.RefreshScripts(); err != nil {
+		return nil, err
+	}
 	return entry, nil
 }
 
@@ -1325,6 +1332,8 @@ func (r *Registry) UpdateKnowledgeConfig(apiName string, kc config.KnowledgeConf
 			if _, err := r.LoadKnowledge(apiName); err != nil {
 				return "", err
 			}
+		} else if err := r.RefreshScripts(); err != nil {
+			return "", err
 		}
 		return fmt.Sprintf("Knowledge config of %q updated (enabled=%v, language=%q, type=%q).", apiName, kc.Enabled, kc.Language, kc.ResolveKnowledgeBackend().Type), nil
 	}

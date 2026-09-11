@@ -31,6 +31,8 @@ const (
 	ToolMetaSync             = "meta_sync"
 	ToolUpdateMetaKnowledge  = "meta_update_knowledge"
 	ToolView                 = "view"
+	ToolScriptList           = "script_list"
+	ToolScriptDescribe       = "script_describe"
 )
 
 // knowledgeToolNames is the set of knowledge management tools.
@@ -44,6 +46,7 @@ var knowledgeToolNames = map[string]bool{
 	ToolMetaInit: true, ToolMetaStatus: true, ToolMetaSync: true,
 	ToolUpdateMetaKnowledge: true,
 	ToolView:                true,
+	ToolScriptList:          true, ToolScriptDescribe: true,
 }
 
 func isKnowledgeTool(name string) bool { return knowledgeToolNames[name] }
@@ -314,6 +317,28 @@ func buildKnowledgeTools() []mcp.Tool {
 				Required: []string{"api", "view_id"},
 			},
 		},
+		{
+			Name:        ToolScriptList,
+			Description: "List the registered kind: script tools (executable tengo knowledge docs surfaced as MCP tools). Optionally scope to one API; pass api=\"_meta\" for the global scripts. Reports each script's fully qualified tool name, permissions, parameters and whether it is currently exposed.",
+			InputSchema: mcp.Schema{
+				Type: "object",
+				Properties: map[string]mcp.Schema{
+					"api": {Type: "string", Description: `Name of the registered API to scope to ("_meta" for global scripts; omit for all)`},
+				},
+			},
+		},
+		{
+			Name:        ToolScriptDescribe,
+			Description: "Return one script's definition: id, API, summary, declared permissions, parameters and the tengo source. Identify it by fully qualified tool name or by api + id.",
+			InputSchema: mcp.Schema{
+				Type: "object",
+				Properties: map[string]mcp.Schema{
+					"api":    {Type: "string", Description: "Name of the registered API (optional disambiguator)"},
+					"script": {Type: "string", Description: "Fully qualified tool name (e.g. _meta__free_disk_space) or script id"},
+				},
+				Required: []string{"script"},
+			},
+		},
 	}
 }
 
@@ -542,6 +567,18 @@ func (r *Registry) runKnowledgeTool(connID, name string, args map[string]interfa
 		return okResult(out)
 	case ToolView:
 		out, err := r.RenderView(connID, strArg(args, "api"), strArg(args, "scope"), strArg(args, "view_id"), interfaceMapArg(args, "inputs"))
+		if err != nil {
+			return errResult(err)
+		}
+		return okResult(out)
+	case ToolScriptList:
+		out, err := r.ListScripts(strArg(args, "api"))
+		if err != nil {
+			return errResult(err)
+		}
+		return okResult(out)
+	case ToolScriptDescribe:
+		out, err := r.DescribeScript(strArg(args, "api"), strArg(args, "script"))
 		if err != nil {
 			return errResult(err)
 		}

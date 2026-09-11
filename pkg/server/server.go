@@ -658,12 +658,15 @@ func handleInitializeJSONRPC(connID string, req *jsonRPCRequest) jsonRPCResponse
 func handleToolsListJSONRPC(connID string, req *jsonRPCRequest, reg *Registry) jsonRPCResponse {
 	serverLog.Debug("handling tools/list", "conn_id", connID)
 
+	// tools/list is answered per connection: a session with a footprint override
+	// sees its own filtered view; everyone else sees the global baseline.
+	tools := reg.ToolsForSession(connID)
 	// Construct the result payload based on gin-mcp's structure
 	resultPayload := map[string]interface{}{
-		"tools": reg.Tools(),
+		"tools": tools,
 		"metadata": map[string]interface{}{
 			"version": "2024-11-05", // Align with gin-mcp if possible
-			"count":   len(reg.Tools()),
+			"count":   len(tools),
 		},
 	}
 
@@ -1151,6 +1154,12 @@ func handleToolCallJSONRPC(connID string, req *jsonRPCRequest, reg *Registry) js
 			text = fmt.Sprintf("Failed to execute tool '%s': %s", params.ToolName, text)
 		}
 		resultPayload = toolResultPayload(params.ToolName, req.ID, res.ok, text)
+	} else if ref, ok := reg.scriptToolFor(params.ToolName); ok {
+		text, execErr := reg.RunScript(connID, params.ToolName, params.Input)
+		if execErr == nil {
+			reg.RecordTrace(connID, ref.scope, params.ToolName, cloneArgs(params.Input))
+		}
+		resultPayload = toolResultFromText(params.ToolName, req.ID, text, execErr)
 	} else {
 		httpResp, execErr := executeRegisteredTool(reg, connID, &params)
 		if execErr == nil {
@@ -1175,6 +1184,15 @@ func handleToolCallJSONRPC(connID string, req *jsonRPCRequest, reg *Registry) js
 // authenticates via a login endpoint, a session token is obtained first and
 // attached to the request.
 func executeRegisteredTool(reg *Registry, connID string, params *ToolCallParams) (*http.Response, error) {
+	// Per-session exposure gate: a tool that is registered but not exposed for
+	// THIS session is rejected with an activation hint. Reachable only through
+	// stale plans/races (clients re-list after tools/list_changed); run_task and
+	// scripts carry the same connID so the gate applies uniformly.
+	if api, _, ok := reg.ResolveTool(params.ToolName); ok {
+		if !reg.IsToolExposedForSession(connID, params.ToolName) {
+			return nil, fmt.Errorf("%s; re-list tools to refresh the client's tool set", exposeActivationHint(params.ToolName, api.Def.Name))
+		}
+	}
 	req, _, cfg, err := buildRegisteredRequestFor(reg, connID, params)
 	if err != nil {
 		return nil, err
@@ -1283,6 +1301,24 @@ func toolResultFromHTTP(toolName string, reqID interface{}, httpResp *http.Respo
 		Content:    []ToolResultContent{{Type: "text", Text: string(bodyBytes)}}, // TODO: Handle JSON responses properly if Content-Type indicates it
 		StatusCode: httpResp.StatusCode,
 		IsError:    false,
+		ToolCallID: fmt.Sprintf("%v", reqID),
+	}
+}
+
+// toolResultFromText builds a ToolResultPayload from a script's textual output.
+func toolResultFromText(toolName string, reqID interface{}, text string, execErr error) ToolResultPayload {
+	if execErr != nil {
+		serverLog.Error("error executing script tool", "tool", toolName, "error", execErr)
+		msg := fmt.Sprintf("Failed to execute tool '%s': %v", toolName, execErr)
+		return ToolResultPayload{
+			Content:    []ToolResultContent{{Type: "text", Text: msg}},
+			IsError:    true,
+			Error:      &MCPError{Message: msg},
+			ToolCallID: fmt.Sprintf("%v", reqID),
+		}
+	}
+	return ToolResultPayload{
+		Content:    []ToolResultContent{{Type: "text", Text: text}},
 		ToolCallID: fmt.Sprintf("%v", reqID),
 	}
 }

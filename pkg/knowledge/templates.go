@@ -119,7 +119,28 @@ func IndexSkeleton(apiName, lang string) string {
 	fmt.Fprintf(&b, "# Manual de %s\n\n", apiName)
 	fmt.Fprintf(&b, "## Glossary\n\n- [incidencias](glossary/incidencias.md)\n")
 	fmt.Fprintf(&b, "\n## Capabilities\n\n- [Nueva tarea](capabilities/nueva-tarea.md)\n")
+	fmt.Fprintf(&b, "\n## Scripts\n\n")
+	fmt.Fprintf(&b, "Solve a recurring procedure once interactively, then promote it to a reusable tool:\n\n")
+	fmt.Fprintf(&b, "1. run the steps manually (or with run_task)\n")
+	fmt.Fprintf(&b, "2. capture the recipe with knowledge_remember_sequence\n")
+	fmt.Fprintf(&b, "3. write it as a kind: script document under `scripts/` (tengo); it becomes an MCP tool `%s__<id>`\n", apiName)
 	return b.String()
+}
+
+// ScriptSkeleton returns a skeleton kind: script document: a comment
+// front-matter (id, summary, params, permissions) plus a tengo body.
+func ScriptSkeleton(apiName, id string) string {
+	return "// ---\n" +
+		"// kind: script\n" +
+		"// id: " + id + "\n" +
+		"// summary: What this script does\n" +
+		"// permissions: []   # mcp, os, exec, fs, http (privileged modules default deny)\n" +
+		"// params:\n" +
+		"//   - {name: example, required: false, type: string}\n" +
+		"// ---\n" +
+		"// Tengo source below. This recipe was first solved interactively, then\n" +
+		"// promoted into a reusable script tool (" + apiName + "__" + id + ").\n" +
+		"return \"hello from " + id + "\"\n"
 }
 
 // ViewSkeleton returns a skeleton doc for a web UI view/dashboard: a declared

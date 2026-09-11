@@ -64,7 +64,8 @@ func LoadLocal(root string, opts LoadOptions) (*Library, error) {
 			}
 			return nil
 		}
-		if strings.HasSuffix(strings.ToLower(name), ".md") {
+		if strings.HasSuffix(strings.ToLower(name), ".md") ||
+			strings.HasSuffix(strings.ToLower(name), ".tengo") {
 			files = append(files, p)
 		}
 		return nil
@@ -91,9 +92,24 @@ func LoadLocal(root string, opts LoadOptions) (*Library, error) {
 			rel = filepath.Base(p)
 		}
 		rel = filepath.ToSlash(rel)
+		if strings.EqualFold(filepath.Ext(rel), ".tengo") {
+			doc, err = ParseScriptDoc(rel, data)
+			if err != nil {
+				lib.warnf("cannot parse %s: %v", p, err)
+				continue
+			}
+		} else if doc.Kind == KindScript {
+			// A Markdown script doc: lift the fenced tengo body into Source.
+			src := extractTengoFence(doc.Body)
+			if strings.TrimSpace(src) == "" {
+				lib.warnf("cannot parse %s: kind: script but no fenced tengo code block found", p)
+				continue
+			}
+			doc.Source = src
+		}
 		doc.Path = rel
 		if doc.ID == "" {
-			doc.ID = strings.TrimSuffix(path.Base(rel), ".md")
+			doc.ID = strings.TrimSuffix(path.Base(rel), path.Ext(rel))
 		}
 		if doc.API == "" {
 			doc.API = opts.API
@@ -160,6 +176,21 @@ func (lib *Library) validateDoc(doc *Doc, opts LoadOptions) {
 				lib.warnf("%s: capability step %d references unknown tool %q", doc.Path, i+1, step.Tool)
 			}
 		}
+	case KindScript:
+		for _, m := range doc.Permissions {
+			if !knownScriptModule(m) && !doc.Draft {
+				lib.warnf("%s: unknown script permission %q", doc.Path, m)
+			}
+		}
+		if strings.TrimSpace(doc.Source) == "" && !doc.Draft {
+			lib.warnf("%s: kind: script but no executable source", doc.Path)
+		}
+	}
+
+	// .tengo sources are code, not Markdown: skip the link/relation validation
+	// (which would otherwise flag tengo literals as broken links).
+	if doc.Kind == KindScript && strings.HasSuffix(strings.ToLower(doc.Path), ".tengo") {
+		return
 	}
 
 	for _, link := range ExtractLinks(doc.Body) {
@@ -242,6 +273,20 @@ func (lib *Library) Views() []*Doc {
 	var out []*Doc
 	for _, d := range lib.Docs {
 		if (d.Kind == KindView || d.Kind == KindDashboard) && !d.Draft {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// Scripts returns the non-draft kind: script documents.
+func (lib *Library) Scripts() []*Doc {
+	if lib == nil {
+		return nil
+	}
+	var out []*Doc
+	for _, d := range lib.Docs {
+		if d.Kind == KindScript && !d.Draft {
 			out = append(out, d)
 		}
 	}

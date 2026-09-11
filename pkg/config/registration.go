@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -385,10 +386,21 @@ type APIDefinition struct {
 
 	// IncludeTags/ExcludeTags/IncludeOps/ExcludeOps filter which spec operations
 	// are exposed (same semantics as the --include-* / --exclude-* CLI flags).
+	// They form the API's allow-set: the hard boundary no runtime activation may
+	// cross. Operations excluded here can only be re-exposed by editing this
+	// config; the runtime exposure tools (see Exposure) act strictly within it.
 	IncludeTags []string `json:"include_tags,omitempty" yaml:"include_tags,omitempty"`
 	ExcludeTags []string `json:"exclude_tags,omitempty" yaml:"exclude_tags,omitempty"`
 	IncludeOps  []string `json:"include_ops,omitempty" yaml:"include_ops,omitempty"`
 	ExcludeOps  []string `json:"exclude_ops,omitempty" yaml:"exclude_ops,omitempty"`
+
+	// Exposure is the runtime tool-footprint projection: which of the allowed
+	// operations are actually served to sessions (whole-API on/off, slim mode
+	// "none", per-tag/per-operation force-on/off). Empty mirrors the defaults
+	// (Active=true, Mode=all), i.e. everything in the allow-set is exposed. A
+	// session can deviate from this baseline for itself via the
+	// update_session_api_exposure tool.
+	Exposure ExposureConfig `json:"exposure,omitempty" yaml:"exposure,omitempty"`
 
 	// Targets are the concrete servers implementing this API.
 	Targets []TargetDefinition `json:"targets,omitempty" yaml:"targets,omitempty"`
@@ -421,6 +433,74 @@ func (a *APIDefinition) Target(name string) (TargetDefinition, bool) {
 	return TargetDefinition{}, false
 }
 
+// Exposure mode values for the dynamic tool-footprint runtime projection.
+const (
+	// ExposureModeAll serves every operation that passes the API's allow-set,
+	// minus the disabled lists. It is the default and the backward-compatible
+	// behavior for existing registrations.
+	ExposureModeAll = "all"
+	// ExposureModeNone serves only the operations explicitly force-on through
+	// the active lists ("slim footprint" bootstrap). The full spec stays indexed
+	// and discoverable regardless.
+	ExposureModeNone = "none"
+)
+
+// ExposureConfig is the runtime footprint projection of an API's operations:
+// which of its (allowed) tools are actually served to sessions. The allow-set
+// (IncludeTags/ExcludeTags/IncludeOps/ExcludeOps) is the hard boundary; exposure
+// only narrows/widens within it. A session override can deviate from this global
+// baseline for its own session only (see Registry.sessionExposure).
+type ExposureConfig struct {
+	// Active toggles the whole API. When explicitly false, none of its
+	// operation tools are served (the API stays registered; targets, auth and
+	// knowledge intact). Nil means "default on" (ActiveEnabled() == true).
+	Active *bool `json:"active,omitempty" yaml:"active,omitempty"`
+	// Mode selects the projection rule: "all" (everything allowed except the
+	// disabled lists) or "none" (only the active lists are served).
+	Mode string `json:"mode,omitempty" yaml:"mode,omitempty"`
+	// ActiveTags are force-on sections for mode "none".
+	ActiveTags []string `json:"active_tags,omitempty" yaml:"active_tags,omitempty"`
+	// ActiveOps are force-on operations for mode "none".
+	ActiveOps []string `json:"active_ops,omitempty" yaml:"active_ops,omitempty"`
+	// DisabledTags are force-off sections for mode "all".
+	DisabledTags []string `json:"disabled_tags,omitempty" yaml:"disabled_tags,omitempty"`
+	// DisabledOps are force-off operations for mode "all".
+	DisabledOps []string `json:"disabled_ops,omitempty" yaml:"disabled_ops,omitempty"`
+}
+
+// ActiveEnabled resolves the whole-API switch: nil means "not configured", which
+// defaults to on.
+func (e ExposureConfig) ActiveEnabled() bool {
+	if e.Active == nil {
+		return true
+	}
+	return *e.Active
+}
+
+// boolPtr returns a pointer to a bool literal (for optional enum-like fields).
+func boolPtr(v bool) *bool { return &v }
+
+// IsZero reports whether no exposure override is configured (so the caller can
+// fall back to the defaults Active=true, Mode=all).
+func (e ExposureConfig) IsZero() bool {
+	return e.Active == nil && e.Mode == "" && len(e.ActiveTags) == 0 && len(e.ActiveOps) == 0 && len(e.DisabledTags) == 0 && len(e.DisabledOps) == 0
+}
+
+// NormalizeDefaults fills in the default exposure (Active=true, Mode=all) for an
+// all-zero config and validates the mode value. It returns a copy; the receiver
+// is not mutated.
+func (e ExposureConfig) NormalizeDefaults() ExposureConfig {
+	if e.Mode == "" {
+		e.Mode = ExposureModeAll
+	} else if e.Mode != ExposureModeAll && e.Mode != ExposureModeNone {
+		e.Mode = ExposureModeAll
+	}
+	if e.Active == nil {
+		e.Active = boolPtr(true)
+	}
+	return e
+}
+
 // ServerConfig holds settings for the MCP server process itself.
 type ServerConfig struct {
 	// Port is the port the MCP HTTP server listens on. When set in the config
@@ -442,6 +522,38 @@ type MetaConfig struct {
 	// Knowledge configures the meta knowledge library (see KnowledgeConfig).
 	// It uses the same backend/learning semantics as per-API knowledge.
 	Knowledge KnowledgeConfig `json:"knowledge,omitempty" yaml:"knowledge,omitempty"`
+
+	// Scripting configures the tengo script executor: the operator allowlists
+	// that gate the privileged host modules and the default run budget.
+	Scripting ScriptingConfig `json:"scripting,omitempty" yaml:"scripting,omitempty"`
+}
+
+// ScriptingConfig configures execution of kind: script knowledge documents.
+// Scripts always run with the safe standard-library modules; the privileged
+// modules (mcp/os/exec/fs/http) are denied unless a script declares the
+// permission and, for exec/fs/http, the operator allowlist admits the call.
+type ScriptingConfig struct {
+	// ExecAllowlist is the set of command names (or basenames) the exec module
+	// may run. Empty denies every exec call.
+	ExecAllowlist []string `json:"exec_allowlist,omitempty" yaml:"exec_allowlist,omitempty"`
+	// FSReadRoots are the directory prefixes the fs module may read from. An
+	// empty list denies every fs read.
+	FSReadRoots []string `json:"fs_read_roots,omitempty" yaml:"fs_read_roots,omitempty"`
+	// HTTPAllowlist are the URL patterns the http module may request. A pattern
+	// ending in "*" matches by prefix; otherwise it must match exactly. Empty
+	// denies every request.
+	HTTPAllowlist []string `json:"http_allowlist,omitempty" yaml:"http_allowlist,omitempty"`
+	// DefaultTimeoutS is the default per-run wall-clock budget in seconds
+	// (default 10).
+	DefaultTimeoutS int `json:"default_timeout_s,omitempty" yaml:"default_timeout_s,omitempty"`
+}
+
+// DefaultTimeout returns the configured default run budget, or 10s.
+func (s ScriptingConfig) DefaultTimeout() time.Duration {
+	if s.DefaultTimeoutS > 0 {
+		return time.Duration(s.DefaultTimeoutS) * time.Second
+	}
+	return 10 * time.Second
 }
 
 // NormalizeKnowledgeConfig fills in the knowledge defaults shared by per-API and

@@ -1,9 +1,12 @@
 # Plan — Meta knowledge base, scripting (tengo), dynamic exposure, and web UI (CopilotKit)
 
 > Status: **specification**, with **Phase 1 (meta knowledge base) implemented and
-> tested**, and **Phase 7's `view`/`dashboard` model + `view` tool + `run_task`
-> auto-display implemented and tested** (see §4.6, §7, and the "Implementation
-> progress" section at the end); Phase 2+ planned below. This document is the
+> tested**, **Phase 2 (dynamic exposure / runtime tool footprint) implemented and
+> tested**, **Phase 3 (scripting core, tengo) implemented and tested**, and
+> **Phase 7's `view`/`dashboard` model + `view` tool + `run_task`
+> auto-display implemented and tested** (see §2, §3, §4.6, §7, and the
+> "Implementation
+> progress" section at the end); Phase 4+ planned below. This document is the
 > detailed
 > development guide for four coordinated features on top of the per-API semantic
 > knowledge base (`docs/knowledge.md`, implemented):
@@ -1058,6 +1061,95 @@ Tracked against §6. Each item links the working changes that shipped it.
     doc→view resolution) and `TestRunTaskAutoDisplaysBoundDashboard`
     (run_task emits the bound dashboard on completion, non-matching dashboards
     are excluded, backing call re-issued) in `pkg/server`.
+- **Phase 2 — Dynamic exposure**: the parser is non-destructive (always emits
+  the full `ToolSet`/`ApiDoc`; the parser filtering tests are restated as "the
+  filters do not drop operations"), and the include/exclude config is
+  re-interpreted as the API's hard allow-set (`allowSetAllows`). Implemented:
+  - `pkg/config`: `ExposureConfig` (active *bool, mode all|none, active/disabled
+    tags+ops), `ActiveEnabled()`, `NormalizeDefaults()`, `Exposure` on
+    `APIDefinition` (persisted in the config file).
+  - `pkg/server/registry.go`: `apiEntry.OpTags` (opID→tags built from the
+    ApiDoc at load), `apiEntry.Exposure` (normalized global baseline),
+    `Registry.sessionExposure[connID][api]` (seeded in `NewRegistry`, cleaned in
+    `DropSession`), `allowSetAllows`/`exposureExposesOp`/`opExposedLocked`/
+    `opExposedForSession`/`opStatusForSession`, rebuild filters the *snapshot*
+    by the baseline while the `index` keeps every tool (ResolveTool stays
+    global), `ToolsForSession(connID)`, `IsToolExposedForSession`,
+    `UpdateAPIExposure` (rebuild+persist+broadcast), `UpdateSessionAPIExposure` /
+    `ClearSessionAPIExposure` (ephemeral), `APIExposure`/`exposureReportForSession`,
+    `exposurePatch` (+appendUnique/removeString), session-aware
+    `APIsForSession` annotations, and `liveEntry`.
+  - `pkg/server/server.go`: `tools/list` answered per connection via
+    `ToolsForSession(connID)` (`handleToolsListJSONRPC`), and a per-session
+    call-time gate in `executeRegisteredTool` that rejects registered-but-hidden
+    tools with the activation hint (no string surgery; resolved via the index).
+  - `pkg/server/management.go`: tools `update_api_exposure`,
+    `update_session_api_exposure`, `clear_session_api_exposure` and
+    `api_exposure` (+ schemas and `exposurePatchFromArgs`/`exposureConfigFromArgs`);
+    `register_openapi_api` accepts an `exposure` object; introspection annotates
+    the session view (`list_openapi_apis` adds `exposed_tools`/`active`/`mode`/
+    `session_override`, `describe_openapi_api`/`search_openapi_operations` mark
+    each endpoint `active`, `get_api_operation` reports exposure, and
+    `export_openapi_config` includes the global `exposure` baseline).
+  - `pkg/server/tasks.go`: `run_task` dry-run flags steps whose tool is not
+    exposed to the session (`not exposed in this session — enable with
+    update_session_api_exposure`); auto mode fails fast through the call gate.
+  - Tests (`pkg/server/exposure_test.go`): defaults expose-all, global
+    deactivate/reactivate, mode `none` + tag footprint + `all` reset, session
+    overrides that neither leak (`sessA` vs `sessB`) nor survive `DropSession`,
+    widening within the allow-set, allow-set as a hard boundary
+    (`excluded-by-config` cannot be activated), call-time gate, broadcast of
+    `tools/list_changed` after global and session mutations, report shape,
+    session-aware introspection, API registration from the `exposure` config,
+    and per-session `tools/list` through the JSON-RPC handler.
+- **Phase 3 — Scripting core**: scripts are `kind: script` knowledge docs
+  (`scripts/*.tengo` with a `// ---` comment front-matter, or `*.md` with a
+  fenced tengo body) surfaced as MCP tools and executed in a sandboxed tengo VM.
+  Implemented:
+  - `go.mod`: `github.com/d5/tengo/v2 v2.17.0`.
+  - `pkg/script` (new): `Executor`/`Options`/`Host`, `Run(ctx, src, args, host)`
+    with a per-run time budget (default 10s) + tengo `SetMaxAllocs` guard, and
+    return normalization (nil/undefined → "", string verbatim, else JSON). The
+    source is wrapped in an IIFE so a top-level `return` is legal. Safe stdlib
+    modules (math/text/times/rand/base64/hex/json/fmt/enum) are always imported;
+    the host modules `mcp` (call/resolve), `os` (getenv/hostname/getwd/environ),
+    `exec` (allowlisted `run`), `fs` (root-constrained read/stat/list) and
+    `http` (allowlisted get/post) are default-deny and gated by the declared
+    `permissions` plus `meta.scripting` allowlists. The compile cache is
+    partitioned by `(sourceHash, Host.Key)` so per-session `mcp` bindings never
+    leak across sessions.
+  - `pkg/knowledge`: `ParseScriptDoc` (both encodings), `Doc.Source`, the
+    list-or-map `Permissions` type with `Has`, extended `Param`
+    (type/description/default) and `Doc.TimeoutS`; `LoadLocal`/`LocalBackend`
+    index `.tengo`; `Library.Scripts()`; `.tengo` sources skip Markdown link
+    validation; `ScriptSkeleton` + a scripts section in the index manual.
+  - `pkg/config`: `MetaConfig.Scripting` (`exec_allowlist`, `fs_read_roots`,
+    `http_allowlist`, `default_timeout_s`) with `DefaultTimeout()`.
+  - `pkg/server`: `scriptRef` + `Registry.scriptTools`; `refreshScriptsLocked`/
+    `RefreshScripts` re-scan libraries on knowledge load and rebuild the
+    snapshot; `rebuild` merges script tools (collision with operations /
+    management tools is a hard error); `ToolsForSession`/`IsToolExposedForSession`
+    gate per-API scripts by the synthetic `script` tag (meta scripts always
+    exposed); `RunScript`, `ToolInfo`, `CallTool` (the unified management/
+    script/operation bridge used by the `mcp` module); `ListScripts`/
+    `DescribeScript` + the `script_list`/`script_describe` management tools; the
+    JSON-RPC handler routes script tools to `toolResultFromText`; `run_task`
+    marks script steps `(static script)` and executes them through `RunScript`.
+  - Tests: `pkg/script/executor_test.go` (returns, params, safe stdlib, denied
+    module, mcp bridge, timeout, exec/fs/http allowlists) and
+    `pkg/server/scripts_test.go` (registration/dispatch, mcp bridge to a
+    management tool, denied `os`, global + per-session exposure isolation,
+    operation-name collision, unregister cleanup, `run_task` dry-run/auto,
+    exposure-report script totals).
+  - Introspection: `api_exposure`/`update_*_exposure` and `list_openapi_apis`
+    now include scripts (the synthetic `script` tag and `"kind":"script"`
+    entries) in their totals and per-operation lists, so the footprint report
+    matches what `tools/list` actually serves.
+  - Verified end-to-end over JSON-RPC (`knowledge_load` → `tools/call` a script
+    → `mcp.call` chaining) and under Delve per `docs/ai_debugging.md`
+    (breakpoints at the handler branch, `RunScript`, the `mcpCall` bridge and
+    result normalization; the 10s budget correctly fires when debug pauses
+    consume it).
 
 ### In progress / next
 
@@ -1065,5 +1157,43 @@ Tracked against §6. Each item links the working changes that shipped it.
   stream (needs the Phase 5/6 web-session bridge for delivery), dashboard
   auto-display surfaced through `/ui`, and the front-end serializer + input
   controls re-issuing backing calls.
-- Phases 2–6 (dynamic exposure, scripting, web UI shell, generative UI) as
-  planned in §6.
+- Phase 4 — Scripting hardening: compiled-program eviction/bounding, the
+  per-script `timeout` guard surfaced in `script_list`, `mcp.resolve`-driven
+  script discovery hints, tracing→capability folding of script runs, and
+  `script_*` create/update/promote tooling; then Phases 5–6 (web UI shell,
+  generative UI) as planned in §6.
+### Resume here (next working session)
+
+**Status:** Phase 1 (meta KB), Phase 7 model/view tools, Phase 2 (dynamic
+exposure) and Phase 3 (scripting core) are implemented, tested and committed to
+`main` (§8 above). `pkg/script`, `pkg/knowledge/script.go`,
+`pkg/server/scripts.go`, `pkg/server/exposure_test.go`,
+`pkg/server/scripts_test.go` and `pkg/knowledge/script_test.go` are the main new
+files.
+
+**Next up: Phase 4 — Scripting hardening (§2.3–§2.5, §6).** Suggested order:
+
+1. Bound the compile cache (`Executor.cache`) with an LRU/size cap; today it is
+   partitioned per `(sourceHash, host.Key)` and grows unbounded.
+2. Surface the per-script `timeout` and declared permissions in `script_list`,
+   and add a `related script exists` hint from `knowledge_search`/`discover_task`
+   when an intent matches a script's `intents`.
+3. Fold successful script runs into capability drafts (the `RecordTrace` hook is
+   already wired for scripts in `runKnowledgeTool`/`run_task`).
+4. Optional tooling: `knowledge_promote`-style promotion of a session sequence
+   into a `scripts/` doc (the `ScriptSkeleton` template exists).
+
+**Working notes (Phase 3 was developed here):**
+
+- `pkg/script` is intentionally independent of `pkg/server`/`pkg/knowledge`:
+  callers inject the host bridge through `script.Host` at run time, and the
+  compile cache is partitioned by `Host.Key` (the session id) so a script that
+  uses `mcp` never shares compiled bytecode across sessions.
+- Scripts are resolved through `Registry.scriptToolFor` (not `ResolveTool`,
+  which stays operation-only) and dispatched by `Registry.RunScript`; the
+  per-session exposure gate uses the synthetic `script` tag (`scriptTag`).
+- A script colliding with an operation or management tool is a hard
+  registration error from `rebuild`.
+- Always resolve tool names through `toolFullName`/the registry maps
+  (`ResolveTool`/`scriptToolFor`/`IsToolExposedForSession`) — capped/truncated
+  names must never be re-derived by string surgery.
