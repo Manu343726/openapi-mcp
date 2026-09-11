@@ -2,12 +2,16 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/ckanthony/openapi-mcp/pkg/config"
+	"github.com/ckanthony/openapi-mcp/pkg/knowledge"
 	"github.com/ckanthony/openapi-mcp/pkg/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -864,6 +868,7 @@ func TestKnowledgeToolsRegistered(t *testing.T) {
 		ToolCapabilities, ToolDiscoverTask, ToolUpdateKnowledge, ToolRunTask,
 		ToolKnowledgeReview, ToolKnowledgeSync,
 		ToolMetaInit, ToolMetaStatus, ToolMetaSync, ToolUpdateMetaKnowledge,
+		ToolView,
 	} {
 		assert.Contains(t, names, want, "missing knowledge tool %q", want)
 	}
@@ -1017,6 +1022,83 @@ func TestMetaNameReserved(t *testing.T) {
 	// RegisterAPI refuses to create an API named "_meta".
 	_, err = reg.RegisterAPI(config.APIDefinition{Name: metaAPIName, Spec: "{}"}, false)
 	assert.ErrorContains(t, err, "reserved")
+}
+
+func TestViewToolRendersDashboard(t *testing.T) {
+	// Backend serving a JSON list the dashboard's source tool calls.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if q := r.URL.Query().Get("q"); q != "" {
+			fmt.Fprint(w, `[{"user":1,"action":"login","time":"12:00"},{"user":2,"action":"logout","time":"12:30"}]`)
+			return
+		}
+		fmt.Fprint(w, `[{"user":1,"action":"view","time":"11:50"}]`)
+	}))
+	defer backend.Close()
+
+	reg := NewRegistry("")
+	_, err := reg.RegisterAPI(config.APIDefinition{
+		Name: "acme",
+		Spec: `{"openapi":"3.0.0","info":{"title":"Acme","version":"1"},"paths":{"/users":{"get":{"operationId":"listUserActions","parameters":[{"name":"q","in":"query","schema":{"type":"string"}}],"responses":{"200":{"description":"OK"}}}}}}`,
+		Targets: []config.TargetDefinition{
+			{Name: "default", BaseURL: backend.URL},
+		},
+		Knowledge: config.KnowledgeConfig{Enabled: true, Language: "en", Root: t.TempDir()},
+	}, false)
+	require.NoError(t, err)
+
+	// A dashboard persisted into the knowledge library (views/ directory).
+	viewMD := `---
+id: users-activity
+kind: dashboard
+api: acme
+summary: Users and their actions
+view:
+  source: acme__listUserActions
+  layout: table
+  auto_show: true
+  inputs:
+    - {name: q, label: Search, type: text, binding: param.q}
+    - {name: page, type: number, default: "1"}
+---
+# Users and their actions
+`
+	relPath := overlayPathFor(&knowledge.Doc{Kind: knowledge.KindDashboard, ID: "users-activity"}) // dashboards/users-activity.md
+	_, err = reg.KnowledgeUpsert("conn-1", "acme", viewMD, relPath, true)
+	require.NoError(t, err)
+
+	// Render it through knowledge_upsert-persisted library doc.
+	out, err := reg.RenderView("conn-1", "acme", "dashboards", "users-activity", map[string]interface{}{"q": "login"})
+	require.NoError(t, err)
+	assert.Contains(t, out, `"view_id": "users-activity"`)
+	assert.Contains(t, out, `"source": "acme__listUserActions"`)
+	assert.Contains(t, out, `"auto_show": true`)
+	assert.Contains(t, out, `"resolved_tool": "acme__listUserActions"`)
+	assert.Contains(t, out, `"status_code": 200`)
+	assert.Contains(t, out, `"user"`)
+	assert.Contains(t, out, `"action"`)
+	// The bound input reached the backing call (search "login" -> 2 rows).
+	assert.Contains(t, out, `"count": 2`)
+	// Declared inputs are reported with their resolved values.
+	assert.Contains(t, out, `"name": "q"`)
+	assert.Contains(t, out, `"name": "page"`)
+	assert.Contains(t, out, `"value": "1"`)
+
+	// Missing required input is rejected.
+	viewReq := `---
+id: must
+kind: view
+view:
+  source: acme__listUserActions
+  inputs:
+    - {name: q, required: true, binding: param.q}
+---
+`
+	_, err = reg.KnowledgeUpsert("conn-1", "acme", viewReq, "views/must.md", false)
+	require.NoError(t, err)
+	_, err = reg.RenderView("conn-1", "acme", "views", "must", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires input")
 }
 
 func registerLearningEntry(t *testing.T, reg *Registry, root string) {

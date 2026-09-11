@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -672,6 +673,231 @@ func (r *Registry) overlayGet(connID, apiName, docRef string) (*knowledge.Doc, b
 		}
 	}
 	return nil, false
+}
+
+// viewScopePaths are the library subdirectories searched when a view or
+// dashboard is looked up by id alone.
+var viewScopePaths = []string{"views", "dashboards"}
+
+// renderViewDoc resolves a kind: view / kind: dashboard document within the
+// API's knowledge (overlay first, then library), tolerating a scoped path
+// (views/<id>.md, dashboards/<id>.md), a bare id, or a library-relative path.
+func renderViewDoc(r *Registry, apiName string, connID string, scope, viewID string) (*knowledge.Doc, error) {
+	if doc, ok := r.overlayGet(connID, apiName, viewID); ok {
+		return doc, nil
+	}
+	if scope != "" {
+		if doc, ok := r.overlayGet(connID, apiName, scope+"/"+viewID); ok {
+			return doc, nil
+		}
+	}
+	entry, err := r.apiEntryFor(apiName)
+	if err != nil {
+		return nil, err
+	}
+	if doc, ok := entry.Knowledge.Get(viewID); ok {
+		return doc, nil
+	}
+	for _, dir := range viewScopePaths {
+		if doc, ok := entry.Knowledge.Get(dir + "/" + viewID); ok {
+			return doc, nil
+		}
+	}
+	if scope != "" {
+		if doc, ok := entry.Knowledge.Get(scope + "/" + viewID); ok {
+			return doc, nil
+		}
+	}
+	return nil, fmt.Errorf("view/dashboard document %q not found in API %q knowledge", viewID, apiName)
+}
+
+// RenderView renders a kind: view / kind: dashboard knowledge document into a
+// structured, screen-ready payload (layout, columns, rows, resolved inputs).
+// It fills the view's declared inputs from the provided values (falling back to
+// each input's default), resolves the view's Source to the backing tool and,
+// when it resolves to a registered tool, executes the backing call with the
+// input values bound to its parameters (binding "param.<name>"). Results that
+// decompose into rows/columns are returned as such; anything else falls back to
+// the raw text ("unknown shape -> markdown", per the web UI projection rules).
+func (r *Registry) RenderView(connID, apiName, scope, viewID string, inputs map[string]interface{}) (string, error) {
+	viewDoc, err := renderViewDoc(r, apiName, connID, scope, viewID)
+	if err != nil {
+		return "", err
+	}
+	v := viewDoc.View
+	if v == nil {
+		return "", fmt.Errorf("document %q (kind %s) is not a view/dashboard (no view block)", viewDoc.ID, viewDoc.Kind)
+	}
+
+	// 1. Resolve the declared inputs: provided value -> declared default -> "".
+	type resolvedInput struct {
+		Name     string      `json:"name"`
+		Label    string      `json:"label,omitempty"`
+		Type     string      `json:"type,omitempty"`
+		Options  []string    `json:"options,omitempty"`
+		Required bool        `json:"required,omitempty"`
+		Default  string      `json:"default,omitempty"`
+		Binding  string      `json:"binding,omitempty"`
+		Value    interface{} `json:"value"`
+	}
+	resolvedInputs := make([]resolvedInput, 0, len(v.Inputs))
+	boundArgs := map[string]interface{}{}
+	missing := []string{}
+	for _, in := range v.Inputs {
+		ri := resolvedInput{Name: in.Name, Label: in.Label, Type: in.Type, Options: in.Options, Required: in.Required, Default: in.Default, Binding: in.Binding}
+		if val, ok := inputs[in.Name]; ok && val != nil {
+			ri.Value = val
+		} else if in.Default != "" {
+			ri.Value = in.Default
+		} else {
+			ri.Value = ""
+		}
+		if in.Required {
+			switch tv := ri.Value.(type) {
+			case string:
+				if tv == "" {
+					missing = append(missing, in.Name)
+				}
+			case nil:
+				missing = append(missing, in.Name)
+			}
+		}
+		if in.Binding != "" && ri.Value != nil && ri.Value != "" {
+			if param, ok := viewBindingParam(in.Binding); ok {
+				boundArgs[param] = ri.Value
+			}
+		}
+		resolvedInputs = append(resolvedInputs, ri)
+	}
+	if len(missing) > 0 {
+		return "", fmt.Errorf("view %q requires input(s): %s", viewID, strings.Join(missing, ", "))
+	}
+
+	render := map[string]interface{}{
+		"api":       apiName,
+		"view_id":   viewDoc.ID,
+		"kind":      viewDoc.Kind,
+		"title":     viewDoc.Title,
+		"summary":   viewDoc.Summary,
+		"source":    v.Source,
+		"layout":    v.Layout,
+		"auto_show": v.AutoShow,
+		"inputs":    resolvedInputs,
+	}
+
+	// 2. Resolve Source -> tool and execute the backing call, if resolvable.
+	sourceTool := v.Source
+	if sourceTool != "" && apiName != metaAPIName {
+		full := sourceTool
+		if !strings.Contains(full, toolNameSep) {
+			full = toolFullName(apiName, sourceTool)
+		}
+		if _, _, ok := r.ResolveTool(full); ok {
+			httpResp, execErr := executeRegisteredTool(r, connID, &ToolCallParams{ToolName: full, Input: boundArgs})
+			if execErr != nil {
+				render["call_error"] = execErr.Error()
+				render["resolved_tool"] = full
+			} else {
+				defer httpResp.Body.Close()
+				bodyBytes, readErr := io.ReadAll(httpResp.Body)
+				if readErr != nil {
+					render["call_error"] = "failed to read backing call response: " + readErr.Error()
+				} else {
+					render["resolved_tool"] = full
+					render["status_code"] = httpResp.StatusCode
+					columns, rows := rowsFromJSON(bodyBytes)
+					if columns != nil {
+						render["columns"] = columns
+						render["rows"] = rows
+						render["count"] = len(rows)
+					} else {
+						render["text"] = string(bodyBytes)
+					}
+				}
+			}
+		} else {
+			render["source_unresolved"] = true
+		}
+	}
+
+	body, err := json.MarshalIndent(render, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+// viewBindingParam extracts the target parameter from an input binding of the
+// form "param.<name>". Non-parameter bindings (e.g. step-n jsonpath references
+// used by run_task) map to no call argument and are not forwarded.
+func viewBindingParam(binding string) (string, bool) {
+	for _, cand := range strings.FieldsFunc(binding, func(r rune) bool { return r == ' ' || r == ',' }) {
+		if rest, ok := strings.CutPrefix(cand, "param."); ok && rest != "" {
+			return rest, true
+		}
+	}
+	return "", false
+}
+
+// rowsFromJSON decomposes a JSON response body into columns/rows when possible:
+// an array of flat objects, or a single object. It returns nil columns when the
+// shape is unknown (primitive, nested, or not JSON) so the caller falls back to
+// raw text.
+func rowsFromJSON(body []byte) ([]string, []map[string]interface{}) {
+	var v interface{}
+	if err := json.Unmarshal(body, &v); err != nil {
+		return nil, nil
+	}
+	asRow := func(m map[string]interface{}) map[string]interface{} {
+		row := map[string]interface{}{}
+		for k, val := range m {
+			if fmt.Sprintf("%v", val) != "<nil>" && !isCompositeJSON(val) {
+				row[k] = val
+			}
+		}
+		return row
+	}
+	switch t := v.(type) {
+	case []interface{}:
+		rows := []map[string]interface{}{}
+		colSet := map[string]bool{}
+		for _, e := range t {
+			if m, ok := e.(map[string]interface{}); ok {
+				row := asRow(m)
+				for k := range row {
+					colSet[k] = true
+				}
+				rows = append(rows, row)
+			} else {
+				return nil, nil // non-object elements -> unknown shape
+			}
+		}
+		cols := make([]string, 0, len(colSet))
+		for k := range colSet {
+			cols = append(cols, k)
+		}
+		sort.Strings(cols)
+		return cols, rows
+	case map[string]interface{}:
+		row := asRow(t)
+		cols := make([]string, 0, len(row))
+		for k := range row {
+			cols = append(cols, k)
+		}
+		sort.Strings(cols)
+		return cols, []map[string]interface{}{row}
+	default:
+		return nil, nil
+	}
+}
+
+func isCompositeJSON(v interface{}) bool {
+	switch v.(type) {
+	case map[string]interface{}, []interface{}:
+		return true
+	default:
+		return false
+	}
 }
 
 // KnowledgeSearch ranks documents (library + overlay) by relevance to query.

@@ -30,6 +30,7 @@ const (
 	ToolMetaStatus           = "meta_status"
 	ToolMetaSync             = "meta_sync"
 	ToolUpdateMetaKnowledge  = "meta_update_knowledge"
+	ToolView                 = "view"
 )
 
 // knowledgeToolNames is the set of knowledge management tools.
@@ -42,6 +43,7 @@ var knowledgeToolNames = map[string]bool{
 	ToolRunTask: true, ToolKnowledgeReview: true, ToolKnowledgeSync: true,
 	ToolMetaInit: true, ToolMetaStatus: true, ToolMetaSync: true,
 	ToolUpdateMetaKnowledge: true,
+	ToolView:                true,
 }
 
 func isKnowledgeTool(name string) bool { return knowledgeToolNames[name] }
@@ -298,6 +300,20 @@ func buildKnowledgeTools() []mcp.Tool {
 				},
 			},
 		},
+		{
+			Name:        ToolView,
+			Description: "Render a kind: view / kind: dashboard knowledge document from the web UI's session mirror: resolves the document's Source (the backing tool/capability/script), fills its declared inputs from the provided values (and defaults), and returns a structured, screen-ready render payload (layout, columns, rows, resolved inputs). Inputs bound to the source's parameters (binding: param.<name>) are forwarded to the backing call. This powers interactive dashboards: changing a bound input re-invokes the backing call through the same bridge.",
+			InputSchema: mcp.Schema{
+				Type: "object",
+				Properties: map[string]mcp.Schema{
+					"api":     {Type: "string", Description: `Name of the registered API ("_meta" addresses the global knowledge base)`},
+					"scope":   {Type: "string", Description: "Scoped document lookup: views/<id>.md, dashboards/<id>.md or the document id"},
+					"view_id": {Type: "string", Description: "Document id of the view or dashboard to render"},
+					"inputs":  {Type: "object", Properties: map[string]mcp.Schema{}, Description: "Resolved values for the view's declared inputs (pagination, search, filters, sorting)"},
+				},
+				Required: []string{"api", "view_id"},
+			},
+		},
 	}
 }
 
@@ -520,6 +536,12 @@ func (r *Registry) runKnowledgeTool(connID, name string, args map[string]interfa
 			return errResult(fmt.Errorf("invalid conflict policy %q (want rebase|ff_only)", c))
 		}
 		out, err := r.UpdateKnowledgeConfig(api, kc)
+		if err != nil {
+			return errResult(err)
+		}
+		return okResult(out)
+	case ToolView:
+		out, err := r.RenderView(connID, strArg(args, "api"), strArg(args, "scope"), strArg(args, "view_id"), interfaceMapArg(args, "inputs"))
 		if err != nil {
 			return errResult(err)
 		}
