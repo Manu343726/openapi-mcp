@@ -67,3 +67,11 @@ select, input, button {
 input { flex: 1; }
 button { background: var(--accent); color: #0b1220; border: none; font-weight: 600; cursor: pointer; }
 button:hover { filter: brightness(1.05); }
+table.result-table { border-collapse: collapse; width: 100%; font-size: 13px; }
+table.result-table th, table.result-table td {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+table.result-table th { color: var(--muted); font-weight: 600; }

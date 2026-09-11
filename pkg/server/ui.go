@@ -118,12 +118,20 @@ func (b *UIBridge) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	if tool != "" {
 		text, callErr := b.reg.CallTool(sess.connID, tool, req.Arguments)
+		payload := ToolResultPayload{
+			Content: []ToolResultContent{{Type: "text", Text: text}},
+			IsError: callErr != nil,
+		}
+		view := b.reg.viewParams(tool, payload)
 		resp["tool"] = tool
 		resp["text"] = text
+		resp["view"] = view
 		if callErr != nil {
 			resp["ok"] = false
 			resp["error"] = callErr.Error()
 		}
+		// Mirror every outcome onto the session stream, like the MCP handler.
+		enqueueView(sess.connID, view)
 	} else {
 		resp["text"] = b.helpText(sess.connID, req.Message)
 	}

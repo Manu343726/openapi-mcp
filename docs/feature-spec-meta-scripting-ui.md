@@ -6,7 +6,8 @@
 > (scripting hardening) implemented and tested**, **Phase 5 (web UI shell)
 > implemented and tested**, and
 > **Phase 7's `view`/`dashboard` model + `view` tool + `run_task`
-> auto-display implemented and tested** (see §2, §3, §4.6, §7, and the
+> auto-display and result→view wrapper implemented and tested** (see §2, §3,
+> §4.6, §7, and the
 > "Implementation
 > progress" section at the end); Phase 6+ planned below. This document is the
 > detailed
@@ -1063,6 +1064,19 @@ Tracked against §6. Each item links the working changes that shipped it.
     doc→view resolution) and `TestRunTaskAutoDisplaysBoundDashboard`
     (run_task emits the bound dashboard on completion, non-matching dashboards
     are excluded, backing call re-issued) in `pkg/server`.
+- **Phase 7 remainder — result→view wrapper** (`pkg/server/views.go`): every
+  session tool outcome is projected into a structured view payload
+  (`Registry.viewParams`: a `view`-tool render payload passes through; arrays of
+  objects → `table` with columns/rows/count; a single JSON object → `list`;
+  otherwise `markdown`) and pushed as a `notifications/view` JSON-RPC
+  notification on the calling session's stream. MCP/legacy-SSE clients get it
+  after their response is queued (never before, so response ordering is
+  preserved); the `/ui/chat` bridge returns the same payload inline and mirrors
+  it on `/ui/events`. Tests: `pkg/server/views_test.go`
+  (`TestViewParamsTable`/`MarkdownFallback`/`PassthroughForViewTool`,
+  `TestEmitToolResultViewDeliversToSession`, `TestUIViewEventForScriptResult`).
+  Dashboard auto-display *through the UI* and the front-end interactive inputs
+  remain in Phase 6.
 - **Phase 2 — Dynamic exposure**: the parser is non-destructive (always emits
   the full `ToolSet`/`ApiDoc`; the parser filtering tests are restated as "the
   filters do not drop operations"), and the include/exclude config is
@@ -1201,10 +1215,9 @@ Tracked against §6. Each item links the working changes that shipped it.
 
 ### In progress / next
 
-- Phase 7 remainder: result→view wrapper firing `view` events on the session
-  stream (now that `/ui/events` exists, this is deliverable), dashboard
-  auto-display surfaced through `/ui`, and the front-end serializer + input
-  controls re-issuing backing calls.
+- Phase 7 remainder (UI side): dashboard auto-display surfaced through `/ui` and
+  the front-end serializer + interactive input controls re-issuing backing calls
+  (the server-side result→view wrapper and `notifications/view` stream are done).
 - Phase 6 — Generative UI: replace/augment the dependency-free shell in
   `webui/dist` with a CopilotKit front-end (`@copilotkit/react-core`,
   `react-ui`, `react-textarea`) and build the GenUI component map for tool
@@ -1216,9 +1229,11 @@ Tracked against §6. Each item links the working changes that shipped it.
 
 **Status:** Phases 1 (meta KB), 2 (dynamic exposure), 3 (scripting core), 4
 (scripting hardening) and 5 (web UI shell) are implemented, tested and committed
-to `main`; the Phase 7 view/dashboard model is done pending the Phase 6 GenUI +
-result→view wiring (§8 above). Newest additions: `webui/`
-(embed + `dist/`), `pkg/server/ui.go`, `pkg/server/ui_test.go`.
+to `main`; the Phase 7 model, `view` tool, `run_task` auto-display and the
+result→view wrapper + `notifications/view` stream are done. Remaining Phase 6
+work is the CopilotKit/GenUI front-end and dashboard auto-display through `/ui`.
+Newest additions: `webui/` (embed + `dist/`), `pkg/server/ui.go`,
+`pkg/server/views.go` and their tests.
 
 **Next up: Phase 6 — Generative UI (§4.3, §4.5, §7).** Suggested order:
 

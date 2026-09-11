@@ -478,10 +478,37 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, reg *Registry
 		w.WriteHeader(http.StatusAccepted)
 		// Use the standard message for successfully queued responses
 		fmt.Fprintln(w, "Request accepted, response will be sent via SSE.")
+		// After the response is queued, mirror the outcome as a structured view
+		// on the same session stream (never before the response, so clients that
+		// read the next message optimistically still see the reply first).
+		if tr, ok := respToSend.Result.(ToolResultPayload); ok {
+			if tool := toolNameFromParams(req.Params); tool != "" {
+				reg.emitToolResultView(connID, tool, tr)
+			}
+		}
 	default:
 		serverLog.Error("failed to queue response; SSE channel likely full or closed", "conn_id", connID, "id", respToSend.ID)
 		http.Error(w, "Failed to queue response for SSE channel", http.StatusInternalServerError)
 	}
+}
+
+// toolNameFromParams extracts the "name" field of a tools/call params value
+// (which may still be json.RawMessage or an already-decoded map).
+func toolNameFromParams(params interface{}) string {
+	switch p := params.(type) {
+	case map[string]interface{}:
+		if s, ok := p["name"].(string); ok {
+			return s
+		}
+	case json.RawMessage:
+		var m map[string]interface{}
+		if json.Unmarshal(p, &m) == nil {
+			if s, ok := m["name"].(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
 }
 
 // dispatchJSONRPC validates a parsed JSON-RPC request and runs it against the

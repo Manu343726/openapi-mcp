@@ -248,6 +248,13 @@ These are deliberate constraints — the tests and behavior rely on them.
   registry snapshot), `/ui/chat` (POST `{tool,arguments}` or `{message}`; drives
   `Registry.CallTool`), `/ui/events` (per-session SSE of broadcast
   notifications).
+- **Result→view**: `pkg/server/views.go` projects each tool outcome into a
+  structured payload (arrays of objects → `table`; a single JSON object →
+  `list`; a `view` tool render payload passes through; otherwise `markdown`) and
+  pushes `notifications/view` on the session stream. For legacy SSE the view is
+  emitted *after* the response is queued so response ordering is preserved; for
+  `/ui/chat` the same payload is returned inline as `view`. Keep the projection
+  best-effort — unknown shapes must degrade, never error.
 - **Per-session isolation**: each browser tab's session token maps to its own MCP
   `connID`, registered in `activeConnections`/`initializedConnections`. That
   reuses all existing `connID`-keyed state (knowledge overlay, session targets,
