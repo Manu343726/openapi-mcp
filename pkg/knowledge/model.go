@@ -24,10 +24,12 @@ const (
 	KindSchema     Kind = "schema"
 	KindField      Kind = "field"
 	KindCapability Kind = "capability"
-	KindPattern    Kind = "pattern" // reusable, API-agnostic procedure
-	KindTool       Kind = "tool"    // documents a tool / integration / command
-	KindIdea       Kind = "idea"    // free-form note; never executed
-	KindScript     Kind = "script"  // executable tengo: surfaced as an MCP tool
+	KindPattern    Kind = "pattern"   // reusable, API-agnostic procedure
+	KindTool       Kind = "tool"      // documents a tool / integration / command
+	KindIdea       Kind = "idea"      // free-form note; never executed
+	KindScript     Kind = "script"    // executable tengo: surfaced as an MCP tool
+	KindView       Kind = "view"      // what to render and how (web UI)
+	KindDashboard  Kind = "dashboard" // a saved view or group of views + inputs
 )
 
 // Doc is a single knowledge document. The YAML front-matter holds the machine
@@ -45,6 +47,7 @@ type Doc struct {
 	Steps       []Step   `yaml:"steps,omitempty"`
 	Related     []Rel    `yaml:"related,omitempty"`
 	Permissions []string `yaml:"permissions,omitempty"` // required capability scopes for kind: script
+	View        *View    `yaml:"view,omitempty"`        // rendering spec for kind: view/dashboard
 	Draft       bool     `yaml:"draft,omitempty"`
 
 	Body string `yaml:"-"`
@@ -82,6 +85,30 @@ type InputBinding struct {
 type Rel struct {
 	Type   string `yaml:"type"`
 	Target string `yaml:"target"` // library-relative path of the target doc
+}
+
+// View describes how a result is rendered in the web UI (kind: view /
+// kind: dashboard). Source is the tool/capability/script feeding the view;
+// Inputs declares the interactive controls (search, pagination, sort,
+// filters) bound to the backing call's parameters; Layout picks the rendering;
+// AutoShow makes the UI display the view automatically when Source completes.
+type View struct {
+	Source   string      `yaml:"source,omitempty"`    // tool/capability/script feeding the view
+	Inputs   []ViewInput `yaml:"inputs,omitempty"`    // interactive controls (search, page, sort, filter)
+	Layout   string      `yaml:"layout,omitempty"`    // table | list | cards | chart
+	AutoShow bool        `yaml:"auto_show,omitempty"` // show when Source completes (run_task memo)
+}
+
+// ViewInput declares one interactive control of a view/dashboard and how it
+// maps onto the backing call (see InputBinding for the binding grammar).
+type ViewInput struct {
+	Name     string   `yaml:"name"`
+	Label    string   `yaml:"label,omitempty"`
+	Type     string   `yaml:"type,omitempty"`    // text | number | select | ...
+	Options  []string `yaml:"options,omitempty"` // for select
+	Required bool     `yaml:"required,omitempty"`
+	Default  string   `yaml:"default,omitempty"`
+	Binding  string   `yaml:"binding,omitempty"` // param.<name> | step.<n>.<jsonpath> on Source
 }
 
 // headingRe matches the first Markdown heading.

@@ -111,9 +111,10 @@ func Serialize(doc *Doc) ([]byte, error) {
 		Steps       []Step   `yaml:"steps,omitempty"`
 		Related     []Rel    `yaml:"related,omitempty"`
 		Permissions []string `yaml:"permissions,omitempty"`
+		View        *View    `yaml:"view,omitempty"`
 		Draft       bool     `yaml:"draft,omitempty"`
 	}
-	f := fm{doc.ID, doc.Kind, doc.API, doc.Language, doc.Summary, doc.Anchor, doc.Tags, doc.Intents, doc.Params, doc.Steps, doc.Related, doc.Permissions, doc.Draft}
+	f := fm{doc.ID, doc.Kind, doc.API, doc.Language, doc.Summary, doc.Anchor, doc.Tags, doc.Intents, doc.Params, doc.Steps, doc.Related, doc.Permissions, doc.View, doc.Draft}
 	out, err := yaml.Marshal(f)
 	if err != nil {
 		return nil, err

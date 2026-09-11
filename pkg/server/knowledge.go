@@ -417,6 +417,10 @@ func overlayPathFor(doc *knowledge.Doc) string {
 		return "ideas/" + doc.ID + ".md"
 	case knowledge.KindScript:
 		return "scripts/" + doc.ID + ".md"
+	case knowledge.KindView:
+		return "views/" + doc.ID + ".md"
+	case knowledge.KindDashboard:
+		return "dashboards/" + doc.ID + ".md"
 	default:
 		return doc.ID + ".md"
 	}

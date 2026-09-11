@@ -121,3 +121,22 @@ func IndexSkeleton(apiName, lang string) string {
 	fmt.Fprintf(&b, "\n## Capabilities\n\n- [Nueva tarea](capabilities/nueva-tarea.md)\n")
 	return b.String()
 }
+
+// ViewSkeleton returns a skeleton doc for a web UI view/dashboard: a declared
+// rendering of a tool/capability/script result, with optional inputs.
+func ViewSkeleton(apiName, id string) string {
+	return "---\n" +
+		"id: " + id + "\n" +
+		"kind: " + string(KindView) + "\n" +
+		"api: " + apiName + "\n" +
+		"language: en\n" +
+		"summary: How a result is rendered in the web UI\n" +
+		"view:\n" +
+		"  source: <tool name or capability id>\n" +
+		"  layout: table | list | cards | chart\n" +
+		"  inputs: []\n" +
+		"  auto_show: false\n" +
+		"---\n" +
+		"# " + id + "\n\n" +
+		"## Description\n\n<!-- What does this view show, and which source feeds it -->\n"
+}

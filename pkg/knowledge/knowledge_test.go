@@ -65,6 +65,47 @@ func TestSerializeRoundTrip(t *testing.T) {
 	require.Contains(t, re.Body, "Una incidencia")
 }
 
+func TestSerializeViewRoundTrip(t *testing.T) {
+	doc := &Doc{
+		ID:      "users-activity",
+		Kind:    KindDashboard,
+		API:     "acme",
+		Title:   "Users and their actions",
+		Body:    "# Users and their actions\n\nLast two hours.\n",
+		Related: []Rel{{Type: "capability", Target: "capabilities/users-activity.md"}},
+		View: &View{
+			Source:   "acme__list_user_actions",
+			Layout:   "table",
+			AutoShow: true,
+			Inputs: []ViewInput{
+				{Name: "q", Label: "Search", Type: "text", Binding: "param.query"},
+				{Name: "page", Type: "number", Default: "1", Binding: "param.page"},
+				{Name: "sort", Type: "select", Options: []string{"time", "user"}, Binding: "param.sort"},
+			},
+		},
+	}
+	data, err := Serialize(doc)
+	require.NoError(t, err)
+
+	re, err := ParseDoc(data)
+	require.NoError(t, err)
+	require.Equal(t, KindDashboard, re.Kind)
+	require.NotNil(t, re.View)
+	assert.Equal(t, "acme__list_user_actions", re.View.Source)
+	assert.Equal(t, "table", re.View.Layout)
+	assert.True(t, re.View.AutoShow)
+	require.Len(t, re.View.Inputs, 3)
+	assert.Equal(t, "param.query", re.View.Inputs[0].Binding)
+	assert.Equal(t, []string{"time", "user"}, re.View.Inputs[2].Options)
+	assert.Equal(t, "capabilities/users-activity.md", re.Related[0].Target)
+
+	// The body survives the round trip and parsing of a kind: view doc written
+	// from the skeleton emits KindView.
+	re2, err := ParseDoc([]byte(ViewSkeleton("acme", "my-view")))
+	require.NoError(t, err)
+	assert.Equal(t, KindView, re2.Kind)
+}
+
 func writeDoc(t *testing.T, root, rel, content string) {
 	t.Helper()
 	p := filepath.Join(root, filepath.FromSlash(rel))
