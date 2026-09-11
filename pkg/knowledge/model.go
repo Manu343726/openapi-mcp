@@ -24,23 +24,28 @@ const (
 	KindSchema     Kind = "schema"
 	KindField      Kind = "field"
 	KindCapability Kind = "capability"
+	KindPattern    Kind = "pattern" // reusable, API-agnostic procedure
+	KindTool       Kind = "tool"    // documents a tool / integration / command
+	KindIdea       Kind = "idea"    // free-form note; never executed
+	KindScript     Kind = "script"  // executable tengo: surfaced as an MCP tool
 )
 
 // Doc is a single knowledge document. The YAML front-matter holds the machine
 // part; Body holds the human prose with relative Markdown links.
 type Doc struct {
-	ID       string   `yaml:"id,omitempty"`
-	Kind     Kind     `yaml:"kind,omitempty"`
-	API      string   `yaml:"api,omitempty"`
-	Language string   `yaml:"language,omitempty"`
-	Summary  string   `yaml:"summary,omitempty"`
-	Anchor   string   `yaml:"anchor,omitempty"`
-	Tags     []string `yaml:"tags,omitempty"`
-	Intents  []string `yaml:"intents,omitempty"`
-	Params   []Param  `yaml:"params,omitempty"`
-	Steps    []Step   `yaml:"steps,omitempty"`
-	Related  []Rel    `yaml:"related,omitempty"`
-	Draft    bool     `yaml:"draft,omitempty"`
+	ID          string   `yaml:"id,omitempty"`
+	Kind        Kind     `yaml:"kind,omitempty"`
+	API         string   `yaml:"api,omitempty"`
+	Language    string   `yaml:"language,omitempty"`
+	Summary     string   `yaml:"summary,omitempty"`
+	Anchor      string   `yaml:"anchor,omitempty"`
+	Tags        []string `yaml:"tags,omitempty"`
+	Intents     []string `yaml:"intents,omitempty"`
+	Params      []Param  `yaml:"params,omitempty"`
+	Steps       []Step   `yaml:"steps,omitempty"`
+	Related     []Rel    `yaml:"related,omitempty"`
+	Permissions []string `yaml:"permissions,omitempty"` // required capability scopes for kind: script
+	Draft       bool     `yaml:"draft,omitempty"`
 
 	Body string `yaml:"-"`
 

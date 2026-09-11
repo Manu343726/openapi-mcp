@@ -99,20 +99,21 @@ func (l *LocalBackend) Push() error { return nil }
 func Serialize(doc *Doc) ([]byte, error) {
 	// The Doc struct carries yaml tags; a dedicated snippet keeps body separate.
 	type fm struct {
-		ID       string   `yaml:"id,omitempty"`
-		Kind     Kind     `yaml:"kind,omitempty"`
-		API      string   `yaml:"api,omitempty"`
-		Language string   `yaml:"language,omitempty"`
-		Summary  string   `yaml:"summary,omitempty"`
-		Anchor   string   `yaml:"anchor,omitempty"`
-		Tags     []string `yaml:"tags,omitempty"`
-		Intents  []string `yaml:"intents,omitempty"`
-		Params   []Param  `yaml:"params,omitempty"`
-		Steps    []Step   `yaml:"steps,omitempty"`
-		Related  []Rel    `yaml:"related,omitempty"`
-		Draft    bool     `yaml:"draft,omitempty"`
+		ID          string   `yaml:"id,omitempty"`
+		Kind        Kind     `yaml:"kind,omitempty"`
+		API         string   `yaml:"api,omitempty"`
+		Language    string   `yaml:"language,omitempty"`
+		Summary     string   `yaml:"summary,omitempty"`
+		Anchor      string   `yaml:"anchor,omitempty"`
+		Tags        []string `yaml:"tags,omitempty"`
+		Intents     []string `yaml:"intents,omitempty"`
+		Params      []Param  `yaml:"params,omitempty"`
+		Steps       []Step   `yaml:"steps,omitempty"`
+		Related     []Rel    `yaml:"related,omitempty"`
+		Permissions []string `yaml:"permissions,omitempty"`
+		Draft       bool     `yaml:"draft,omitempty"`
 	}
-	f := fm{doc.ID, doc.Kind, doc.API, doc.Language, doc.Summary, doc.Anchor, doc.Tags, doc.Intents, doc.Params, doc.Steps, doc.Related, doc.Draft}
+	f := fm{doc.ID, doc.Kind, doc.API, doc.Language, doc.Summary, doc.Anchor, doc.Tags, doc.Intents, doc.Params, doc.Steps, doc.Related, doc.Permissions, doc.Draft}
 	out, err := yaml.Marshal(f)
 	if err != nil {
 		return nil, err

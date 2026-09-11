@@ -861,7 +861,9 @@ func TestKnowledgeToolsRegistered(t *testing.T) {
 		ToolKnowledgeInit, ToolKnowledgeLoad, ToolKnowledgeStatus, ToolKnowledgeUpsert,
 		ToolKnowledgeDelete, ToolKnowledgeGet, ToolKnowledgeSearch, ToolKnowledgeClarify,
 		ToolKnowledgeRemember, ToolKnowledgeSuggestions, ToolKnowledgePromote,
-		ToolCapabilities, ToolDiscoverTask, ToolUpdateKnowledge,
+		ToolCapabilities, ToolDiscoverTask, ToolUpdateKnowledge, ToolRunTask,
+		ToolKnowledgeReview, ToolKnowledgeSync,
+		ToolMetaInit, ToolMetaStatus, ToolMetaSync, ToolUpdateMetaKnowledge,
 	} {
 		assert.Contains(t, names, want, "missing knowledge tool %q", want)
 	}
@@ -903,6 +905,118 @@ func TestKnowledgeOverlaySession(t *testing.T) {
 	reg.DropSession(connID)
 	_, err = reg.KnowledgeGet(connID, "acme", "nota")
 	assert.ErrorContains(t, err, "not found")
+}
+
+func TestMetaKnowledgeBase(t *testing.T) {
+	root := t.TempDir()
+	reg := NewRegistry("")
+	reg.SetMetaConfig(config.MetaConfig{
+		Knowledge: config.KnowledgeConfig{Enabled: true, Language: "en", Root: root},
+	})
+
+	// meta_status reports the global knowledge base.
+	res := reg.runManagementTool("", ToolMetaStatus, map[string]interface{}{})
+	require.True(t, res.ok, res.text)
+	assert.Contains(t, res.text, "enabled:        true")
+	assert.Contains(t, res.text, "_meta")
+
+	// apiEntryFor routes "_meta" to the synthetic entry.
+	entry, err := reg.apiEntryFor(metaAPIName)
+	require.NoError(t, err)
+	assert.Equal(t, metaAPIName, entry.Def.Name)
+	assert.Nil(t, entry.ToolSet)
+
+	// meta_init scaffolds the spec-less skeleton.
+	res = reg.runManagementTool("", ToolMetaInit, map[string]interface{}{})
+	require.True(t, res.ok, res.text)
+	assert.Contains(t, res.text, "Scaffolded")
+
+	// The index of the meta library exists on disk.
+	idx := filepath.Join(root, "_index.md")
+	data, err := os.ReadFile(idx)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "kind: index")
+
+	// The "_meta" library is indexed after init.
+	res = reg.runManagementTool("", ToolMetaStatus, map[string]interface{}{})
+	assert.Contains(t, res.text, "documents:")
+
+	// knowledge_upsert with api "_meta" stores into the meta overlay.
+	out, err := reg.KnowledgeUpsert("conn-1", metaAPIName, "---\nid: nota-meta\nkind: pattern\n---\n# Nota meta\n\nPatron global.\n", "", false)
+	require.NoError(t, err, out)
+	md, err := reg.KnowledgeGet("conn-1", metaAPIName, "nota-meta")
+	require.NoError(t, err)
+	assert.Contains(t, md, "Patron global")
+
+	// Cross-library kb: links validate against a loaded API library.
+	apiRoot := t.TempDir()
+	reg.mu.Lock()
+	reg.apis["acme"] = &apiEntry{Def: config.APIDefinition{
+		Name:      "acme",
+		Source:    "/tmp/opencode/acme-spec.json",
+		Knowledge: config.KnowledgeConfig{Enabled: true, Language: "es", Root: apiRoot},
+	}}
+	reg.mu.Unlock()
+	require.NoError(t, os.MkdirAll(filepath.Join(apiRoot, "capabilities"), 0755))
+	os.WriteFile(filepath.Join(apiRoot, "capabilities", "mi-tarea.md"),
+		[]byte("---\nid: mi-tarea\nkind: capability\n---\n# Mi tarea\n"), 0644)
+	_, err = reg.LoadKnowledge("acme")
+	require.NoError(t, err)
+	assert.True(t, reg.kbTargetExists("acme", "capabilities/mi-tarea.md"))
+	assert.False(t, reg.kbTargetExists("acme", "capabilities/otra.md"))
+
+	// kb: links to an enabled-but-unindexed API are optimistic (no recursion).
+	reg.mu.Lock()
+	reg.apis["optimistic"] = &apiEntry{Def: config.APIDefinition{
+		Name:      "optimistic",
+		Source:    "/tmp/opencode/optimistic.json",
+		Knowledge: config.KnowledgeConfig{Enabled: true, Language: "en", Root: t.TempDir()},
+	}}
+	reg.mu.Unlock()
+	assert.True(t, reg.kbTargetExists("optimistic", "anything.md"))
+	// ... and unknown APIs / disabled meta are not valid targets.
+	assert.False(t, reg.kbTargetExists("missing-api", "x.md"))
+	reg.SetMetaConfig(config.MetaConfig{Knowledge: config.KnowledgeConfig{Enabled: false}})
+	assert.False(t, reg.kbTargetExists(metaAPIName, "x.md"))
+
+	// meta_update_knowledge hot-edits the meta config, even while disabled
+	// (enabling it is the primary use case).
+	res = reg.runManagementTool("", ToolUpdateMetaKnowledge, map[string]interface{}{"language": "es", "enabled": true})
+	require.True(t, res.ok, res.text)
+	assert.Contains(t, res.text, "_meta")
+	mc := reg.metaConfig()
+	assert.Equal(t, "es", mc.Knowledge.Language)
+	assert.True(t, mc.Knowledge.Enabled)
+
+	// The library is (re)indexed now that it is enabled.
+	res = reg.runManagementTool("", ToolMetaStatus, map[string]interface{}{})
+	require.True(t, res.ok, res.text)
+	assert.Contains(t, res.text, "enabled:        true")
+
+	// A disabled meta base errors on access.
+	reg.SetMetaConfig(config.MetaConfig{Knowledge: config.KnowledgeConfig{Enabled: false}})
+	res = reg.runManagementTool("", ToolMetaStatus, map[string]interface{}{})
+	require.False(t, res.ok)
+	assert.Contains(t, res.text, "not enabled")
+}
+
+func TestMetaNameReserved(t *testing.T) {
+	reg := NewRegistry("")
+	for _, name := range []string{metaAPIName, "_meta"} {
+		err := validateAPIName(name)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "reserved")
+	}
+	// A name that fails the pattern (not just reserved) also errors.
+	err := validateAPIName("__tool")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid API name")
+	// Validation passes for a normal API name.
+	require.NoError(t, validateAPIName("acme"))
+
+	// RegisterAPI refuses to create an API named "_meta".
+	_, err = reg.RegisterAPI(config.APIDefinition{Name: metaAPIName, Spec: "{}"}, false)
+	assert.ErrorContains(t, err, "reserved")
 }
 
 func registerLearningEntry(t *testing.T, reg *Registry, root string) {

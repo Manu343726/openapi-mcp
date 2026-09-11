@@ -26,6 +26,10 @@ const (
 	ToolRunTask              = "run_task"
 	ToolKnowledgeReview      = "knowledge_review"
 	ToolKnowledgeSync        = "knowledge_sync"
+	ToolMetaInit             = "meta_init"
+	ToolMetaStatus           = "meta_status"
+	ToolMetaSync             = "meta_sync"
+	ToolUpdateMetaKnowledge  = "meta_update_knowledge"
 )
 
 // knowledgeToolNames is the set of knowledge management tools.
@@ -36,6 +40,8 @@ var knowledgeToolNames = map[string]bool{
 	ToolKnowledgeSuggestions: true, ToolKnowledgePromote: true,
 	ToolCapabilities: true, ToolDiscoverTask: true, ToolUpdateKnowledge: true,
 	ToolRunTask: true, ToolKnowledgeReview: true, ToolKnowledgeSync: true,
+	ToolMetaInit: true, ToolMetaStatus: true, ToolMetaSync: true,
+	ToolUpdateMetaKnowledge: true,
 }
 
 func isKnowledgeTool(name string) bool { return knowledgeToolNames[name] }
@@ -43,7 +49,9 @@ func isKnowledgeTool(name string) bool { return knowledgeToolNames[name] }
 // buildKnowledgeTools returns the tool definitions exposed for the knowledge
 // layer. They are appended to the always-present management tools.
 func buildKnowledgeTools() []mcp.Tool {
-	apiSchema := func() mcp.Schema { return nameOnlySchema("api", "Name of the registered API") }
+	apiSchema := func() mcp.Schema {
+		return nameOnlySchema("api", `Name of the registered API ("_meta" addresses the global knowledge base)`)
+	}
 	return []mcp.Tool{
 		{
 			Name:        ToolKnowledgeInit,
@@ -246,6 +254,50 @@ func buildKnowledgeTools() []mcp.Tool {
 				Required: []string{"api"},
 			},
 		},
+		{
+			Name:        ToolMetaInit,
+			Description: "Scaffold the global meta knowledge base (\"_meta\"): index, glossary and a capability placeholder, in the meta knowledge language. Unlike knowledge_init there is no OpenAPI spec to expand, so only the library skeleton is created.",
+			InputSchema: mcp.Schema{Type: "object"},
+		},
+		{
+			Name:        ToolMetaStatus,
+			Description: "Report the state of the global meta knowledge base (\"_meta\"): enabled, language, root, backend type, documents count, library warnings and git sync state. Equivalent to knowledge_status with api=\"_meta\".",
+			InputSchema: mcp.Schema{Type: "object"},
+		},
+		{
+			Name:        ToolMetaSync,
+			Description: "Manually synchronize the git-backed global meta knowledge base (\"_meta\") with its remote. Equivalent to knowledge_sync with api=\"_meta\".",
+			InputSchema: mcp.Schema{
+				Type: "object",
+				Properties: map[string]mcp.Schema{
+					"action": {Type: "string", Enum: []interface{}{"pull", "push", "auto"}, Description: "Sync direction (default auto)"},
+				},
+			},
+		},
+		{
+			Name:        ToolUpdateMetaKnowledge,
+			Description: "Update the knowledge configuration of the global meta knowledge base (\"_meta\") in place (hot): enabled, language, root, backend type/repository/branch/sync and learning. Persists and reloads the library. Equivalent to update_api_knowledge with api=\"_meta\".",
+			InputSchema: mcp.Schema{
+				Type: "object",
+				Properties: map[string]mcp.Schema{
+					"enabled":          {Type: "boolean", Description: "Enable/disable the knowledge layer"},
+					"language":         {Type: "string", Description: "Knowledge base language (e.g. es, en)"},
+					"root":             {Type: "string", Description: "Root directory of the library/checkout"},
+					"type":             {Type: "string", Enum: []interface{}{"local", "git"}, Description: "Backend type"},
+					"repository":       {Type: "string", Description: "Git URL (or repository_env host env var name)"},
+					"repository_env":   {Type: "string", Description: "Host env var holding the git URL"},
+					"branch":           {Type: "string", Description: "Git branch (default main)"},
+					"branch_env":       {Type: "string", Description: "Host env var holding the branch"},
+					"sync":             {Type: "string", Enum: []interface{}{"auto", "manual"}, Description: "Git sync policy"},
+					"conflict":         {Type: "string", Enum: []interface{}{"rebase", "ff_only"}, Description: "Git divergence policy"},
+					"auth_token_env":   {Type: "string", Description: "Host env var with git token"},
+					"ssh_key_env":      {Type: "string", Description: "Host env var with ssh key path"},
+					"author_name_env":  {Type: "string", Description: "Host env var with git author name"},
+					"author_email_env": {Type: "string", Description: "Host env var with git author email"},
+					"learning":         {Type: "boolean", Description: "Enable session learning (trace-based capability drafts)"},
+				},
+			},
+		},
 	}
 }
 
@@ -413,6 +465,40 @@ func (r *Registry) runKnowledgeTool(connID, name string, args map[string]interfa
 		return okResult(out)
 	case ToolKnowledgeSync:
 		out, err := r.SyncKnowledge(strArg(args, "api"), strArg(args, "action"))
+		if err != nil {
+			return errResult(err)
+		}
+		return okResult(out)
+	case ToolMetaInit:
+		out, err := r.KnowledgeInit(metaAPIName, nil)
+		if err != nil {
+			return errResult(err)
+		}
+		return okResult(out)
+	case ToolMetaStatus:
+		out, err := r.KnowledgeStatus(metaAPIName)
+		if err != nil {
+			return errResult(err)
+		}
+		return okResult(out)
+	case ToolMetaSync:
+		out, err := r.SyncKnowledge(metaAPIName, strArg(args, "action"))
+		if err != nil {
+			return errResult(err)
+		}
+		return okResult(out)
+	case ToolUpdateMetaKnowledge:
+		kc := knowledgeConfigFromArgs(args, r.metaConfig().Knowledge)
+		if kc.Backend.Type != "" && kc.Backend.Type != "local" && kc.Backend.Type != "git" {
+			return errResult(fmt.Errorf("invalid backend type %q (want local|git)", kc.Backend.Type))
+		}
+		if s := kc.ResolveKnowledgeBackend().Sync; s != "auto" && s != "manual" {
+			return errResult(fmt.Errorf("invalid sync policy %q (want auto|manual)", s))
+		}
+		if c := kc.ResolveKnowledgeBackend().Conflict; c != "rebase" && c != "ff_only" {
+			return errResult(fmt.Errorf("invalid conflict policy %q (want rebase|ff_only)", c))
+		}
+		out, err := r.UpdateKnowledgeConfig(metaAPIName, kc)
 		if err != nil {
 			return errResult(err)
 		}

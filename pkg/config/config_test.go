@@ -213,6 +213,50 @@ func TestKnowledgeConfigRoundTrip(t *testing.T) {
 	assert.Equal(t, kc, got.APIs[0].Knowledge)
 }
 
+func TestMetaConfigRoundTrip(t *testing.T) {
+	fc := &FileConfig{
+		Meta: &MetaConfig{Knowledge: KnowledgeConfig{
+			Enabled:  true,
+			Language: "es",
+			Root:     "/srv/kb/_meta",
+			Backend: KnowledgeBackendConfig{
+				Type:          "git",
+				RepositoryEnv: "META_KB_REPO",
+				Branch:        "main",
+				Sync:          "auto",
+				Conflict:      "rebase",
+			},
+		}},
+		APIs: []APIDefinition{{Name: "acme", Spec: "{}"}},
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, SaveFile(path, fc))
+
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), "META_KB_REPO")
+
+	got, err := LoadFile(path)
+	require.NoError(t, err)
+	require.NotNil(t, got.Meta)
+	assert.Equal(t, fc.Meta, got.Meta)
+	assert.Equal(t, "/srv/kb/_meta", got.Meta.Knowledge.Root)
+}
+
+func TestNormalizeKnowledgeConfigDefaults(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	kc := NormalizeKnowledgeConfig(KnowledgeConfig{Enabled: true}, "_meta", "")
+	assert.Equal(t, filepath.Join(home, ".config", "openapi-mcp", "knowledge", "_meta"), kc.Root)
+
+	kc = NormalizeKnowledgeConfig(KnowledgeConfig{Enabled: true}, "acme", "/etc/openapi-mcp")
+	assert.Equal(t, filepath.Join("/etc/openapi-mcp", "knowledge", "acme"), kc.Root)
+
+	// An explicit Root wins over the default.
+	kc = NormalizeKnowledgeConfig(KnowledgeConfig{Enabled: true, Root: "/custom"}, "_meta", "/etc/openapi-mcp")
+	assert.Equal(t, "/custom", kc.Root)
+}
+
 func TestResolveKnowledgeBackendEnvPrecedence(t *testing.T) {
 	t.Setenv("KB_TEST_REPO", "https://git.example/kb.git")
 	kc := KnowledgeConfig{

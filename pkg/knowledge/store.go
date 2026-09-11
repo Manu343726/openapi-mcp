@@ -26,6 +26,11 @@ type LoadOptions struct {
 	Language   string          // KB language (default for docs without one)
 	Operations map[string]bool // valid operationIds/full tool names (anchor + step validation)
 	Schemas    map[string]bool // valid schema/component names (anchor validation)
+	// KBTargetExists reports whether another knowledge library (scoped to api,
+	// with the given library-relative rel path) contains the target document.
+	// It is used to validate "kb:api:rel" cross-library links. When nil, kb:
+	// links are not validated.
+	KBTargetExists func(api, rel string) bool
 }
 
 // LoadLocal indexes all Markdown documents under root. Documents under
@@ -158,6 +163,12 @@ func (lib *Library) validateDoc(doc *Doc, opts LoadOptions) {
 	}
 
 	for _, link := range ExtractLinks(doc.Body) {
+		if api, rel, ok := ParseKBTarget(link.Target); ok {
+			if opts.KBTargetExists != nil && !opts.KBTargetExists(api, rel) && !doc.Draft {
+				lib.warnf("%s: broken link to %q (no document %q in knowledge base of %q)", doc.Path, link.Target, rel, api)
+			}
+			continue
+		}
 		resolved := NormalizedPath(doc.Path, link.Target)
 		if resolved == "" {
 			continue
@@ -167,6 +178,12 @@ func (lib *Library) validateDoc(doc *Doc, opts LoadOptions) {
 		}
 	}
 	for _, rel := range doc.Related {
+		if api, relPath, ok := ParseKBTarget(rel.Target); ok {
+			if opts.KBTargetExists != nil && !opts.KBTargetExists(api, relPath) {
+				lib.warnf("%s: related link to unknown doc %q", doc.Path, rel.Target)
+			}
+			continue
+		}
 		resolved := NormalizedPath(doc.Path, rel.Target)
 		if _, ok := lib.ByPath[resolved]; !ok {
 			lib.warnf("%s: related link to unknown doc %q", doc.Path, rel.Target)

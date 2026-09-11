@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -106,6 +107,51 @@ func TestLoadLocalValidatesLinksAndAnchors(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.True(t, strings.Contains(strings.Join(lib3.Warnings, "\n"), "doesNotExist"), "warnings: %v", lib3.Warnings)
+}
+
+func TestLoadLocalValidatesKBTargets(t *testing.T) {
+	root := t.TempDir()
+	// A valid kb: link to another API's library index resolves.
+	writeDoc(t, root, "_index.md", "---\nkind: index\n---\n# Manual\n\nVer [patron global](kb:_meta)\n")
+	writeDoc(t, root, "glossary/ok.md", "---\nid: ok\nkind: glossary\n---\n# OK\n\n[documento](kb:acme:capabilities/mi-tarea.md)\n")
+	// A broken kb: link should warn.
+	writeDoc(t, root, "glossary/broken.md", "---\nid: broken\nkind: glossary\n---\n# Broken\n\n[documento](kb:acme:capabilities/no-existe.md)\n")
+
+	lib, err := LoadLocal(root, LoadOptions{
+		API:      "myapi",
+		Language: "en",
+		KBTargetExists: func(api, rel string) bool {
+			if api == "_meta" {
+				return rel == "_index.md"
+			}
+			if api == "acme" {
+				return rel == "capabilities/mi-tarea.md"
+			}
+			return false
+		},
+	})
+	require.NoError(t, err)
+	warnings := strings.Join(lib.Warnings, "\n")
+	assert.True(t, strings.Contains(warnings, "capabilities/no-existe.md"), "warnings: %s", warnings)
+	assert.False(t, strings.Contains(warnings, "kb:_meta"), "warnings: %s", warnings)
+	assert.False(t, strings.Contains(warnings, "mi-tarea.md"), "warnings: %s", warnings)
+}
+
+func TestParseKBTarget(t *testing.T) {
+	api, rel, ok := ParseKBTarget("kb:acme:capabilities/mi-tarea.md")
+	require.True(t, ok)
+	assert.Equal(t, "acme", api)
+	assert.Equal(t, "capabilities/mi-tarea.md", rel)
+
+	// Bare kb:<api> targets the library index.
+	api, rel, ok = ParseKBTarget("kb:_meta")
+	require.True(t, ok)
+	assert.Equal(t, "_meta", api)
+	assert.Equal(t, "_index.md", rel)
+
+	// Non-kb links are not parsed.
+	_, _, ok = ParseKBTarget("../acme/manual.md")
+	assert.False(t, ok)
 }
 
 func TestSearchRanksCapabilities(t *testing.T) {

@@ -434,11 +434,41 @@ type ServerConfig struct {
 	LogLevel string `json:"log_level,omitempty" yaml:"log_level,omitempty"`
 }
 
+// MetaConfig configures the meta knowledge base: a global knowledge scope
+// ("_meta") that is not tied to any OpenAPI API. It hosts reusable patterns,
+// tool/integration write-ups, ideas and scripts across every registered API,
+// and is addressed by passing api: "_meta" to the knowledge_* tools.
+type MetaConfig struct {
+	// Knowledge configures the meta knowledge library (see KnowledgeConfig).
+	// It uses the same backend/learning semantics as per-API knowledge.
+	Knowledge KnowledgeConfig `json:"knowledge,omitempty" yaml:"knowledge,omitempty"`
+}
+
+// NormalizeKnowledgeConfig fills in the knowledge defaults shared by per-API and
+// meta knowledge bases: when Root is empty it resolves to
+// <configDir>/knowledge/<scope>. Backend defaults (type local, branch main, sync
+// auto, conflict rebase) are applied by ResolveKnowledgeBackend at use time and
+// are left untouched here.
+func NormalizeKnowledgeConfig(kc KnowledgeConfig, scope, configDir string) KnowledgeConfig {
+	if kc.Root == "" {
+		if configDir == "" {
+			if h := os.Getenv("HOME"); h != "" {
+				configDir = filepath.Join(h, ".config", "openapi-mcp")
+			} else {
+				configDir = "."
+			}
+		}
+		kc.Root = filepath.Join(configDir, "knowledge", scope)
+	}
+	return kc
+}
+
 // FileConfig is the persisted configuration file format. It lists every API the
 // server should expose (each with its targets); runtime registrations are
 // written back to it so they survive restarts.
 type FileConfig struct {
 	Server ServerConfig    `json:"server,omitempty" yaml:"server,omitempty"`
+	Meta   *MetaConfig     `json:"meta,omitempty" yaml:"meta,omitempty"`
 	APIs   []APIDefinition `json:"apis" yaml:"apis"`
 }
 

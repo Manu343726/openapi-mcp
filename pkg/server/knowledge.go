@@ -111,7 +111,7 @@ func (r *Registry) loadLibrary(entry *apiEntry) error {
 	} else if entry.Def.Knowledge.ResolveKnowledgeBackend().Type == "git" {
 		return err
 	}
-	lib, err := knowledge.LoadLocal(root, knowledgeLoadOptions(entry))
+	lib, err := knowledge.LoadLocal(root, r.knowledgeLoadOptions(entry))
 	if err != nil {
 		return fmt.Errorf("API %q: failed to load knowledge library: %w", entry.Def.Name, err)
 	}
@@ -122,7 +122,9 @@ func (r *Registry) loadLibrary(entry *apiEntry) error {
 }
 
 // knowledgeLoadOptions builds the anchor/step validation set for an entry.
-func knowledgeLoadOptions(api *apiEntry) knowledge.LoadOptions {
+// kbTargetExists resolves "kb:api:rel" cross-library links: it reports whether
+// the target API's knowledge library (or the "_meta" base) contains rel.
+func (r *Registry) knowledgeLoadOptions(api *apiEntry) knowledge.LoadOptions {
 	lang := api.Def.Knowledge.Language
 	if lang == "" {
 		lang = "en"
@@ -141,17 +143,54 @@ func knowledgeLoadOptions(api *apiEntry) knowledge.LoadOptions {
 		}
 	}
 	return knowledge.LoadOptions{
-		API:        api.Def.Name,
-		Language:   lang,
-		Operations: ops,
-		Schemas:    schemas,
+		API:            api.Def.Name,
+		Language:       lang,
+		Operations:     ops,
+		Schemas:        schemas,
+		KBTargetExists: r.kbTargetExists,
 	}
+}
+
+// kbTargetExists reports whether the knowledge library of apiName contains the
+// document at library-relative path rel. It is used to validate
+// "kb:api:rel" cross-library links while indexing a library. apiName may be a
+// registered API or the reserved "_meta" base.
+//
+// It only consults already-loaded libraries (never triggers an on-demand
+// load): validating a library must not recursively load the target (or
+// re-enter the very library being indexed, via self-referencing kb: links).
+// An enabled-but-not-yet-indexed target is assumed to contain the document
+// (optimistic) so cross-library links do not fail during bootstrap; the
+// reference is re-checked once the target library is loaded.
+func (r *Registry) kbTargetExists(apiName, rel string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if apiName == metaAPIName {
+		if r.metaLibrary == nil {
+			if r.meta.Knowledge.Enabled {
+				return true // not indexed yet: optimistic
+			}
+			return false
+		}
+		return r.metaLibrary.ByPath[rel] != nil
+	}
+	entry := r.apis[apiName]
+	if entry == nil {
+		return false
+	}
+	if entry.Knowledge == nil {
+		return entry.Def.Knowledge.Enabled // optimistic; re-checked on load
+	}
+	return entry.Knowledge.ByPath[rel] != nil
 }
 
 // apiEntryFor returns the API entry or an error. Callers must not hold r.mu.
 // When the API has knowledge enabled and it has not been indexed yet, the
 // library is loaded on demand so knowledge reads work right after a restart.
 func (r *Registry) apiEntryFor(apiName string) (*apiEntry, error) {
+	if apiName == metaAPIName {
+		return r.metaEntryFor()
+	}
 	r.mu.RLock()
 	entry, ok := r.apis[apiName]
 	if !ok {
@@ -165,6 +204,34 @@ func (r *Registry) apiEntryFor(apiName string) (*apiEntry, error) {
 			return nil, err
 		}
 	}
+	return entry, nil
+}
+
+// metaEntryFor returns the synthetic API entry of the global ("_meta")
+// knowledge base. It is not a registered API: it has no spec, toolset or HTTP
+// backend, only a knowledge library configured by Registry.SetMetaConfig. The
+// library is loaded lazily on first use and cached in r.metaLibrary.
+func (r *Registry) metaEntryFor() (*apiEntry, error) {
+	kc := r.metaConfig()
+	if !kc.Knowledge.Enabled {
+		return nil, fmt.Errorf("meta knowledge base %q is not enabled (set meta.knowledge.enabled in the config file)", metaAPIName)
+	}
+	entry := &apiEntry{Def: config.APIDefinition{Name: metaAPIName, Knowledge: kc.Knowledge}}
+	r.mu.RLock()
+	existing := r.metaLibrary
+	r.mu.RUnlock()
+	if existing != nil {
+		entry.Knowledge = existing
+		return entry, nil
+	}
+	if err := r.ensureKnowledge(entry); err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	if r.metaLibrary == nil {
+		r.metaLibrary = entry.Knowledge
+	}
+	r.mu.Unlock()
 	return entry, nil
 }
 
@@ -342,6 +409,14 @@ func overlayPathFor(doc *knowledge.Doc) string {
 		return "elements/schemas/" + doc.ID + ".md"
 	case knowledge.KindField:
 		return "elements/fields/" + doc.ID + ".md"
+	case knowledge.KindPattern:
+		return "patterns/" + doc.ID + ".md"
+	case knowledge.KindTool:
+		return "tools/" + doc.ID + ".md"
+	case knowledge.KindIdea:
+		return "ideas/" + doc.ID + ".md"
+	case knowledge.KindScript:
+		return "scripts/" + doc.ID + ".md"
 	default:
 		return doc.ID + ".md"
 	}
@@ -691,9 +766,12 @@ func (r *Registry) DiscoverTask(connID, apiName, intent string) (string, error) 
 		for k, in := range st.Inputs {
 			inputs[k] = in.From
 		}
-		_, opValid := entry.ToolSet.Operations[st.Tool]
-		if !opValid {
-			_, opValid = entry.ToolSet.Operations[strings.TrimPrefix(st.Tool, entry.Def.Name+"__")]
+		opValid := false
+		if entry.ToolSet != nil {
+			_, opValid = entry.ToolSet.Operations[st.Tool]
+			if !opValid {
+				_, opValid = entry.ToolSet.Operations[strings.TrimPrefix(st.Tool, entry.Def.Name+"__")]
+			}
 		}
 		plan = append(plan, map[string]interface{}{
 			"step":      i + 1,
@@ -1002,6 +1080,24 @@ func (r *Registry) RecordTrace(connID, apiName, toolName string, input map[strin
 // UpdateKnowledgeConfig replaces an API's knowledge configuration in place,
 // persists it and reloads the library.
 func (r *Registry) UpdateKnowledgeConfig(apiName string, kc config.KnowledgeConfig) (string, error) {
+	if apiName == metaAPIName {
+		r.mu.Lock()
+		mc := r.meta
+		mc.Knowledge = kc
+		r.meta = mc
+		r.metaLibrary = nil
+		err := r.persist(r.apis)
+		r.mu.Unlock()
+		if err != nil {
+			return "", err
+		}
+		if kc.Enabled {
+			if _, err := r.LoadKnowledge(apiName); err != nil {
+				return "", err
+			}
+		}
+		return fmt.Sprintf("Knowledge config of %q updated (enabled=%v, language=%q, type=%q).", apiName, kc.Enabled, kc.Language, kc.ResolveKnowledgeBackend().Type), nil
+	}
 	r.mu.Lock()
 	entry, ok := r.apis[apiName]
 	if !ok {

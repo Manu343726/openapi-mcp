@@ -27,6 +27,14 @@ const (
 	// part of the tool namespace.
 	toolNameSep = "__"
 
+	// metaAPIName is the reserved name of the global ("_meta") knowledge base.
+	// It is a virtual API with no spec, toolset or HTTP backend: it addresses
+	// the cross-API knowledge scope defined by the config file's "meta" block
+	// (or by default <configDir>/knowledge/_meta). See Registry.SetMetaConfig.
+	// The name intentionally starts with '_' so it can never be a real API name
+	// (validateAPIName rejects names that do not start with an alphanumeric).
+	metaAPIName = "_meta"
+
 	// targetArgName is the synthetic input property injected into every tool of
 	// an API that has targets. It selects which target (server) handles the call.
 	targetArgName = "target"
@@ -127,6 +135,11 @@ type Registry struct {
 	// suggested as capability drafts.
 	sessionTraces map[string][]knowledgeTrace
 
+	// meta is the configured global knowledge base (the "_meta" virtual API).
+	// metaLibrary is its lazily-loaded library; nil until first use.
+	meta        config.MetaConfig
+	metaLibrary *knowledge.Library
+
 	// Optional spec watcher (started on demand when an API opts into monitoring).
 	monitorCtx    context.Context
 	monitorCancel context.CancelFunc
@@ -165,6 +178,28 @@ func (r *Registry) ServerConfig() config.ServerConfig {
 	return r.server
 }
 
+// SetMetaConfig replaces the global ("_meta") knowledge base configuration and
+// clears the lazily-loaded library so the next access re-indexes from disk.
+// The knowledge Root, when empty, resolves to <configDir>/knowledge/_meta.
+func (r *Registry) SetMetaConfig(mc config.MetaConfig) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	configDir := ""
+	if r.persistPath != "" {
+		configDir = filepath.Dir(r.persistPath)
+	}
+	mc.Knowledge = config.NormalizeKnowledgeConfig(mc.Knowledge, metaAPIName, configDir)
+	r.meta = mc
+	r.metaLibrary = nil
+}
+
+// metaConfig returns the configured meta knowledge base settings.
+func (r *Registry) metaConfig() config.MetaConfig {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.meta
+}
+
 // PersistencePath returns the config file path registrations are persisted to
 // ("" when persistence is disabled).
 func (r *Registry) PersistencePath() string {
@@ -176,6 +211,9 @@ func (r *Registry) PersistencePath() string {
 func validateAPIName(name string) error {
 	if name == "" {
 		return nil
+	}
+	if name == metaAPIName {
+		return fmt.Errorf("API name %q is reserved for the global meta knowledge base", name)
 	}
 	if !apiIDPattern.MatchString(name) {
 		return fmt.Errorf("invalid API name %q: must start with an alphanumeric character and contain only letters, digits, '_' or '-'", name)
@@ -455,6 +493,10 @@ func (r *Registry) persist(apis map[string]*apiEntry) error {
 	fc := &config.FileConfig{
 		Server: r.server,
 		APIs:   make([]config.APIDefinition, 0, len(names)),
+	}
+	if r.meta.Knowledge.Enabled {
+		m := r.meta
+		fc.Meta = &m
 	}
 	for _, name := range names {
 		fc.APIs = append(fc.APIs, apis[name].Def)
@@ -923,6 +965,9 @@ func (r *Registry) ReloadFromConfig(path string) ([]string, error) {
 		return nil, err
 	}
 	r.SetServerConfig(fc.Server)
+	if fc.Meta != nil {
+		r.SetMetaConfig(*fc.Meta)
+	}
 	var messages []string
 	for i := range fc.APIs {
 		def := fc.APIs[i]

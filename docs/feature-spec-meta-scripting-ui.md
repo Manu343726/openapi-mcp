@@ -1,6 +1,7 @@
 # Plan — Meta knowledge base, scripting (tengo), dynamic exposure, and web UI (CopilotKit)
 
-> Status: **specification** (not implemented). This document is the detailed
+> Status: **specification**, with **Phase 1 (meta knowledge base) implemented and
+> tested**; Phase 2+ planned below. This document is the detailed
 > development guide for four coordinated features on top of the per-API semantic
 > knowledge base (`docs/knowledge.md`, implemented):
 >
@@ -22,7 +23,9 @@
 > 4. **Interactive web UI via CopilotKit** — a web application served by the MCP
 >    server itself, generated on the fly depending on context, that lets humans
 >    interact with the registered APIs, MCP tools, scripting and the knowledge
->    base.
+>    base. Its purpose is to **mirror the agent session and render its results**
+>    (tool calls, tasks, scripts) as natural views — not merely to provide a
+>    chat — and to host **knowledge-defined dashboards** with interactive inputs.
 >
 > This document does not modify code; it is the reference for the implementation
 > phases at the end.
@@ -53,10 +56,19 @@ a human interface:
   plus each item's activation state. OpenCode and other spec-compliant clients
   subscribe to `notifications/tools/list_changed` and refresh their tool list
   without a restart.
-- A **web session UI** served by the same process that answers MCP, providing a
-  human interface into tools, knowledge and scripting without a separate
-  application, whose layout/content is computed from the current server context
-  (registered APIs, tools, targets, knowledge state) rather than being static.
+- A **web session UI** served by the same process that answers MCP. It is **not a
+  chat webapp**: its purpose is to reflect — live — what is available on a given
+  AI agent session (registered APIs, tools, tasks, knowledge) and what happens
+  on it (tool calls, `run_task` executions, script runs), rendering every result
+  in a natural, human-friendly way as the user talks with the AI. The UI is
+  **knowledge-driven and dashboard-capable**: users can declare full, API-driven
+  data dashboards in natural language ("I want to see the list of users and
+  their actions on the platform for the last two hours") and the MCP *both*
+  returns the data to the agent **and** renders it in the UI as a view.
+  Views can be saved as dashboards in the knowledge base; a dashboard can be
+  associated with a task/tool so it is shown automatically when that task
+  completes; and dashboards support **inputs** (pagination, search, filters,
+  sorting) that let users trigger task/tool calls directly from the UI.
 
 ## Audience
 
@@ -146,6 +158,29 @@ is familiar with `docs/knowledge.md` (`Backend`, `Library`, `Doc`, capability
   notifications (`tools/list_changed`, spec-changed) reach every session but
   render only in a shared status area, never into a chat timeline; and
   `/ui/manifest` is a read-only global snapshot that sessions do not mutate.
+- **The web UI is a session mirror and result renderer, not a chat product.**
+  The value is in reflecting what a given agent session is doing and has
+  available: as the user talks with the AI, every result the session produces
+  (API tool call -> a rendered result table/list/cards, `run_task` -> plan + step
+  results, knowledge search -> document links, script -> its output) is
+  displayed in the UI in a natural manner. The conversation/text is a side
+  effect, not the point. This colors every design choice below: events, model,
+  and rendering are built around *results with structure*, not chat bubbles.
+- **UI views and dashboards are knowledge documents.** A *view* is a knowledge
+  doc describing how to render a result or a query (`kind: view`); a *dashboard*
+  is a saved, named collection of views and their inputs (`kind: dashboard`),
+  optionally associated with the capability/tool that produces its data. Both
+  live in the KB (meta or per-API), are persisted via the normal
+  `knowledge_upsert`/`knowledge_init` discipline, are searchable and can be
+  shared across sessions. "Save as dashboard" = persist such a document.
+- **Dashboards can be bound to tasks.** A dashboard may declare the task/API
+  tool that feeds it; when that task finishes (its tool call completes, its
+  `run_task` returns), the UI displays the dashboard automatically.
+- **Dashboards are interactive call surfaces.** A dashboard's declared *inputs*
+  (search, filters, pagination, sorting, refresh) map onto the parameters of the
+  backing tool/task; interacting with the dashboard issues the corresponding
+  tool/task call through the same session bridge, so the UI both reflects *and*
+  drives the session.
 - **No new long-lived daemons.** Script execution, KB sync and the UI bridge all
   run inside the existing process/goroutine model. `/ui` serves an embedded
   bundle; there is no Node development server in the runtime.
@@ -199,10 +234,31 @@ KindPattern   Kind = "pattern"   // reusable, API-agnostic procedure
 KindTool      Kind = "tool"      // documents a tool / integration / command
 KindIdea      Kind = "idea"      // free-form note; never executed
 KindScript    Kind = "script"    // executable tengo: surface as an MCP tool
+KindView      Kind = "view"      // how to render a result / query in the web UI
+KindDashboard Kind = "dashboard" // saved collection of views + inputs, task-bound
 ```
 
-`Doc` gains a `Permissions` field (used by `kind: script`) and an
-`Input`/`Outputs` description for `pattern`/`script` that mirrors `params`.
+`Doc` gains a `Permissions` field (used by `kind: script`), an
+`Input`/`Outputs` description for `pattern`/`script` that mirrors `params`, and
+a `View`/`Dashboard` block used by `kind: view`/`kind: dashboard` docs:
+
+```go
+type View struct {
+    Source   string     `yaml:"source,omitempty"`   // tool/capability/script feeding the view
+    Inputs   []ViewInput `yaml:"inputs,omitempty"`  // interactive controls (search, page, sort, filter)
+    Layout   string     `yaml:"layout,omitempty"`   // table | list | cards | chart
+    AutoShow bool       `yaml:"auto_show,omitempty"`// show when Source completes (run_task memo)
+}
+type ViewInput struct {
+    Name     string   `yaml:"name"`
+    Label    string   `yaml:"label,omitempty"`
+    Type     string   `yaml:"type,omitempty"`    // text | number | select | ...
+    Options  []string `yaml:"options,omitempty"` // for select
+    Required bool     `yaml:"required,omitempty"`
+    Default  string   `yaml:"default,omitempty"`
+    Binding  string   `yaml:"binding,omitempty"` // param.<name> | step.<n>.<jsonpath> on Source
+}
+```
 
 Tree for `_meta`:
 
@@ -215,12 +271,15 @@ _meta/
   scripts/<id>.md | scripts/<id>.tengo
   glossary/<term>.md
   capabilities/<task>.md
+  views/<slug>.md
+  dashboards/<slug>.md
   _suggestions/
   _templates/<lang>/
 ```
 
 Per-API KBs unchanged, except scripts may also live per-API:
-`apis.<api>.knowledge` tree gains `scripts/<id>.tengo|.md`.
+`apis.<api>.knowledge` tree gains `scripts/<id>.tengo|.md`, and views/dashboards
+may also be defined per-API (`views/`, `dashboards/`).
 
 ### 1.4 Cross-API linking (`pkg/knowledge/links.go`, `store.go`)
 
@@ -252,6 +311,15 @@ New tools (all in `knowledgeToolNames`):
   `knowledge_upsert` used to teach agents the "write it down" discipline.
 - `meta_update_knowledge {enabled?, language?, root?, type?, repository?, ...}`
   — hot config edit of the meta KB (mirror of `update_api_knowledge`).
+- `view {scope?, api?, view_id, inputs?}` (in `knowledgeToolNames`) — render a
+  `kind: view`/`kind: dashboard` document: resolves its `Source`, fills its
+  declared inputs from `inputs`, executes the backing tool/task/preview call and
+  returns a structured, screen-ready result (rows, columns, layout) that the web
+  session bridge renders directly. This single tool powers both the session
+  mirror (results of any call are wrapped into a view) and interactive
+  dashboards (changing an input re-invokes the backing call through the same
+  bridge). `run_task` emits `view` events with rendered views so the UI shows
+  dashboards automatically when a bound task finishes.
 
 ### 1.6 Registry plumbing (`pkg/server/registry.go`)
 
@@ -639,6 +707,15 @@ If the agent renders "I cannot see any tools", `list_openapi_apis` /
 
 ## 4. Interactive web UI (CopilotKit)
 
+The web UI is a **live mirror of the agent session**: it shows the tools, tasks,
+capabilities and knowledge a session has available, and it renders — in a natural
+manner — every result the session produces as the user talks with the AI and the
+AI runs API tools, tasks, scripts and knowledge searches. The chat field is a
+control surface, not the product; the product is the session's results being
+readable and interactable. This is achieved by (a) the session bridge streaming
+every tool/task/script outcome as structured `view` events, and (b) the
+knowledge base holding persistent, queryable UI **views** and **dashboards**.
+
 ### 4.1 Architecture
 
 CopilotKit is a TypeScript/React framework (generative UI, `useChat`, chat
@@ -742,6 +819,11 @@ Projection rules (front-end only, data comes from the registry/manifest):
   duration …)" card.
 - A `knowledge_search` result → a link list into KB docs.
 - A `run_task` plan → a step checklist that turns into result cards per step.
+- A rendered `view` event (`kind: view`/`kind: dashboard` resolved by the
+  `view` tool, or the auto-displayed dashboard of a completed task) → a table,
+  list, card or chart of the structured rows, with the view's declared inputs
+  (search, filters, pagination, sorting) rendered as live controls that re-issue
+  the backing call.
 - An exposure change event → a live "tool count" indicator in the header.
 - Unknown/malformed payloads → fallback markdown block; the UI must never crash
   on unknown stream shapes.
@@ -776,6 +858,51 @@ server:
   bridge may expose a `model:` setting or default to calling tools/knowledge
   directly with a thin local planner (see phase plan).
 
+### 4.6 Views, dashboards and the session mirror
+
+The UI's core promise: **"you talk to the AI, and everything it runs shows up
+here as something you can actually read and interact with."** The following are
+explicit requirements:
+
+- **The UI automatically reflects the agent session.** When the user types
+  "I want to see the list of users and their actions on the platform for the
+  last two hours", the agent resolves the request (via `discover_task`/tool
+  selection), runs the underlying API calls, and the MCP **both returns the data
+  to the agent** (tool text result, as today) **and renders it in the UI** as a
+  structured view. The text answer is not the deliverable; the rendered result
+  is.
+- **Every session outcome renders naturally.** API tool calls, `run_task`
+  executions, script runs and knowledge searches all emit a `view` event whose
+  payload is a screen-ready structure (rows/columns/list/cards, plus metadata
+  such as total count). The front-end's projection rules (§4.3) turn them into
+  components; "unknown shape" always falls back to markdown.
+- **Views and dashboards are knowledge documents.** A user can say "save this as
+  a dashboard"; the bridge persists a `kind: dashboard` doc (or the agent writes
+  a `view` doc) via the normal `knowledge_upsert` path, so dashboards are
+  durable, searchable and reusable across sessions. A `kind: view` doc declares:
+  - `source` — the tool/capability/script it renders (optionally by natural
+    language intent that is resolved at render time),
+  - `inputs` — interactive controls bound to the source's parameters,
+  - `layout` — table/list/cards/chart,
+  - `auto_show` — display automatically when `source` completes.
+- **Dashboards bind to tasks.** A dashboard may be associated with a capability
+  (task) — either declared in the doc (`source`/`related` to the capability) or
+  set at runtime. When that task finishes (`run_task` returns), the server emits
+  the corresponding rendered view and the UI displays the dashboard
+  automatically, without the user asking again.
+- **Dashboards have inputs that drive calls.** A dashboard whose source is e.g.
+  `/users` supports pagination, search, filters and sorting: each control is a
+  declared `ViewInput` bound to a parameter of the backing tool/task
+  (`binding: param.<name>` or a step output). Changing an input (typing a
+  search, paging, clicking a column header) re-invokes the backing call through
+  the same session bridge, so the dashboard is a fully interactive API surface,
+  not a static snapshot.
+- **Declaring a dashboard in natural language.** "Show me a dashboard of the
+  last two hours of user activity, searchable by user id and sortable by time"
+  is a first-class request: the agent creates (or updates) a `view`/`dashboard`
+  doc from the conversation, the `view` tool renders it immediately, and the
+  saved doc means the same dashboard is available in future sessions by name.
+
 ## 5. Changes per package
 
 - `go.mod`: `github.com/d5/tengo/v2` (scripting). Front-end deps live in
@@ -783,14 +910,17 @@ server:
 - `pkg/config`: `MetaConfig`, `ScriptingConfig`, `ExposureConfig` (on
   `APIDefinition`), `UIServerConfig`; validate `_meta`, `server.ui`, exposure
   lists; expose the knowledge-defaults normalization for reuse.
-- `pkg/knowledge`: `model.go` (new kinds + `Permissions`), `store.go` (script
-  doc discovery + `.tengo` parsing), `links.go` (`kb:` scheme),
-  `templates.go` (meta/script templates).
+- `pkg/knowledge`: `model.go` (new kinds incl. `view`/`dashboard` + `View`/
+  `ViewInput` block, `Permissions`), `store.go` (script doc discovery + `.tengo`
+  parsing), `links.go` (`kb:` scheme), `templates.go` (meta/script/view
+  templates).
 - `pkg/parser`: stop dropping ops destructively; always return the full
   `ToolSet`/`ApiDoc` (regression-covered by existing include/exclude tests restated
   as allow-set + exposure tests).
 - `pkg/script` (new): executor + host modules + sandbox/permissions.
-- `pkg/server`: `metaEntry` + `_meta` tools (`meta_*`, `script_*`, `memorize`);
+- `pkg/server`: `metaEntry` + `_meta` tools (`meta_*`, `script_*`, `memorize`,
+  `view`); a **result→view wrapper** that turns tool/task/script outcomes into
+  structured render payloads and emits `view` events on the session stream;
   `Exposure` state on `apiEntry` + `sessionExposure[connID]` (registry maps,
   seeded in `NewRegistry`, cleaned in `DropSession`), `OpTags`,
   expose-filter in `rebuild`, `ToolsForSession(connID)`, per-session call-time
@@ -798,8 +928,10 @@ server:
   `clear_session_api_exposure`/`api_exposure`, introspection annotations,
   exposure-aware dispatch/`run_task`; `ResolveTool`/`executeRegisteredTool`
   script branch; `/ui`, `/ui/manifest`, `/ui/chat` handlers + browser session
-  bridge (`web_session.go`).
-- `webui/` (new): React + CopilotKit SPA, `webui/dist` embedded.
+  bridge (`web_session.go`) with view-event streaming + dashboard auto-display
+  on task completion.
+- `webui/` (new): React + CopilotKit SPA, `webui/dist` embedded; view serializer
+  (table/list/cards/chart) + input controls that re-issue backing calls.
 - `cmd/openapi-mcp/main.go`: flags `--ui`, `--ui-token-env` (wired to
   `server.ui`).
 - Docs: this document (kept as the development guide after implementation),
@@ -840,12 +972,26 @@ server:
 6. **Phase 6 — Generative UI**: CopilotKit GenUI components for tool calls,
    scripts, knowledge results, `run_task` plans and exposure changes;
    context-dependent landing view from the manifest; polish + docs.
+7. **Phase 7 — Views and dashboards (session mirror)**: `view`/`dashboard`
+   model kinds + templates, the `view` tool (source resolution + input
+   binding + render payload), result→view wrapper emitting `view` events for
+   every tool/task/script outcome, dashboard auto-display on task completion,
+   natural-language "save as dashboard" persisting through `knowledge_upsert`,
+   and the front-end serializer + interactive input controls. Specifically
+   exercised end-to-end: the "users and their actions for the last two hours"
+   flow (declare → render → save as dashboard → reopen) and a dashboard whose
+   pagination/search/sort inputs re-issue the backing call. Tests: `ViewInput`
+   binding resolution, render payload shape for tool/task/script results,
+   dashboard doc→view resolution, `run_task` emitting a `view` event on its
+   auto_show source, and session-mirror cases (two sessions see only their own
+   results/inputs).
 
 Each phase ships unit tests following the existing patterns (`pkg/config`,
 `pkg/knowledge`, `pkg/server`, plus `pkg/script`), and a manual smoke test: for
 Phase 1–4, register the weather API, teach `_meta` a disk-space script, slim the
 footprint to one tag and call `_meta__free_disk_space` + a reactivated op; for
-Phase 5–6, open `/ui` and drive a chat tool call end-to-end.
+Phase 5–6, open `/ui` and drive a chat tool call end-to-end. Phase 7 adds the
+"users and actions" dashboard to the smoke flow.
 
 ## 7. Open questions (resolve before Phase 2/4)
 
@@ -866,3 +1012,8 @@ Phase 5–6, open `/ui` and drive a chat tool call end-to-end.
    (sessions may re-activate within the allow-set; spec defaults to **soft**,
    allow-set is the only hard boundary). Consider an optional per-API
    `exposure.locked: true` for hard global deactivations.
+7. How much of a view's layout/chart spec lives in the `view` doc vs. the
+   front-end (spec: the doc declares `layout` + `inputs`, the serializer decides
+   details). Whether rich dashboard widgets need a declarative mini-language in
+   the KB (e.g. chart series, grouping) or if enumerated layouts + inputs suffice
+   for Phase 7.

@@ -51,6 +51,9 @@ func main() {
 			}
 		} else {
 			reg.SetServerConfig(fc.Server)
+			if fc.Meta != nil {
+				reg.SetMetaConfig(*fc.Meta)
+			}
 			for i := range fc.APIs {
 				def := fc.APIs[i]
 				if def.Name == "" {

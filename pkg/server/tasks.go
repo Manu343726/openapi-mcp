@@ -88,9 +88,12 @@ func (r *Registry) RunTask(connID, apiName, task string, params map[string]inter
 	stepOutputs := make([]map[string]string, len(cap.Steps))
 	for i, step := range cap.Steps {
 		tool := normalizeToolName(apiName, step.Tool)
-		_, staticOK := entry.ToolSet.Operations[strings.TrimPrefix(tool, apiName+toolNameSep)]
-		if !staticOK {
-			_, staticOK = entry.ToolSet.Operations[tool]
+		staticOK := false
+		if entry.ToolSet != nil {
+			_, staticOK = entry.ToolSet.Operations[strings.TrimPrefix(tool, apiName+toolNameSep)]
+			if !staticOK {
+				_, staticOK = entry.ToolSet.Operations[tool]
+			}
 		}
 		inputs, err := resolveStepInputs(step.Inputs, params, stepOutputs, i, capOptionalParams(cap))
 		if err != nil {
