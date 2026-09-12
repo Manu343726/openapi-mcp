@@ -1,8 +1,11 @@
 # webui — generative UI
 
-This directory holds the **pre-built static bundle** served by the Go server at
-`/ui`. It is committed so `go build` never needs Node (`webui/embed.go` embeds
-`dist/` with `go:embed`). Rebuild it with `make webui` (requires Node 20+).
+This directory holds the React app that is built and embedded into the Go server
+at `/ui`. **The built bundle (`dist/`) is a git-ignored build artifact** —
+`make webui` (or `npm run build`) produces it here, and the server embeds it via
+`go:embed dist`. The `make build` target depends on `webui`, so the compiled
+binary always embeds the current bundle; run `make webui` once after a fresh
+checkout before `go build ./...`.
 
 ## What it is
 
@@ -38,7 +41,9 @@ overlays, active targets and exposure — exactly like a headless MCP client.
 - `src/components/` — GenUI cards, results pane, landing, view renderer.
 - `src/lib/session.ts`, `src/state/results.tsx` — token/manifest helpers and the
   `/ui/events` results store.
-- `dist/` — committed build output (rebuild via `make webui`).
+- `dist/` — **git-ignored** build output (rebuild via `make webui`), embedded
+  into the binary with `go:embed`.
+- `embed.go` — `//go:embed dist` (compile-time embed of the generated bundle).
 
 ## Scripts
 

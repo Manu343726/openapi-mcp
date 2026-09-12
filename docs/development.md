@@ -241,10 +241,12 @@ These are deliberate constraints — the tests and behavior rely on them.
 - `server.ui` (`pkg/config`): `enabled` (default true), `session_header` (default
   `X-Ui-Session`), `max_sessions` (default 100), `token_env` (optional bearer
   token). `ServeMCP` mounts the routes when `UI.IsEnabled()`.
-- **Static bundle is committed and embedded** (`webui/embed.go`, `//go:embed
-  dist`): the Phase 6 bundle is a CopilotKit (AG-UI) React app built with
-  `make webui` (Node 20+); keep `dist/` committed so the default `go build`
-  never needs Node.
+- **Static bundle is embedded; generated, not tracked** (`webui/embed.go`,
+  `//go:embed dist`): the CopilotKit (AG-UI) bundle in `webui/dist/` is a
+  git-ignored build artifact produced by `make webui` (Node 20+). The `build`
+  make target depends on `webui`, so the compiled binary always embeds the
+  current bundle. On a fresh checkout run `make webui` (or `make build`) once
+  before a bare `go build ./...`.
 - **Endpoints**: `/ui` (SPA), `/ui/` (assets), `/ui/manifest` (session-aware
   registry snapshot), `/ui/chat` (POST `{tool,arguments}` or `{message}`; drives
   `Registry.CallTool`), `/ui/events` (per-session SSE of broadcast

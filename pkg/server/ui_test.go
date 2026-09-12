@@ -219,6 +219,8 @@ func TestUIStaticIndex(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	body, _ := io.ReadAll(resp.Body)
 	index := string(body)
+
+	// The generated bundle is embedded and always exposes the SPA root.
 	assert.Contains(t, index, "<div id=\"root\">")
 
 	// The static subtree serves the bundle assets referenced by the index.

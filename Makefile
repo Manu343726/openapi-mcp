@@ -15,12 +15,13 @@ CONFIG_FILE ?= .config/config.yaml
 # Port the MCP SSE server listens on.
 PORT ?= 8080
 
-.PHONY: all build run deps run-server clean depends
+.PHONY: all build run deps run-server webui test clean depends
 
 all: build
 
-### Compile the MCP server binary to $(BIN).
-build:
+### Compile the MCP server binary to $(BIN). The web build runs first so the
+### binary always embeds the generated UI bundle (dist/ is git-ignored).
+build: webui
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=0 $(GO) build -o $(BIN) ./cmd/openapi-mcp
 	@echo "Built $(BIN)"
@@ -28,6 +29,13 @@ build:
 ### Download Go modules.
 deps:
 	$(GO) mod download
+
+### Rebuild the CopilotKit generative UI into webui/dist (requires Node 20+).
+### dist/ is git-ignored; the server embeds it via go:embed, so a fresh
+### checkout needs `make webui` (or `make build`) before `go build ./...`.
+webui:
+	cd webui && npm run build
+	@echo "web UI rebuilt into webui/dist"
 
 ### Compile and run the MCP server in the foreground (Ctrl+C to stop).
 run: build
@@ -39,13 +47,6 @@ run: build
 run-server: build
 	@mkdir -p $(dir $(CONFIG_FILE))
 	$(BIN) --config $(CONFIG_FILE) --port $(PORT)
-
-### Rebuild the CopilotKit generative UI (requires Node 20+). Output lands in
-### webui/dist, which is go:embed'd into the server and must stay committed so
-### the default `go build` remains Node-free.
-webui:
-	cd webui && npm run build
-	@echo "web UI rebuilt into webui/dist"
 
 ### Run the test suite.
 test:

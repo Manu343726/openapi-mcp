@@ -737,9 +737,10 @@ Browser  ── POST /ui/chat (JSON) ──────────────�
 Browser  ◄── SSE stream (chat messages + copilot  ◄──  notifications, tool calls)
 ```
 
-The `/ui` SPA is a **pre-built static bundle** embedded with `go:embed`
-(`webui/dist`), produced by a `make webui` (Node) step in CI — it is committed or
-built before `go build`. The runtime server never runs Node.
+The `/ui` SPA is the CopilotKit bundle produced by `make webui` into
+`webui/dist` — git-ignored, and embedded into the binary with `go:embed` on
+every `make build` (which depends on the `webui` target). The runtime server
+never runs Node.
 
 The chat bridge owns an MCP-style connection: it creates a `connID` per browser
 session (`X-Ui-Session`), registers it in `activeConnections`-like plumbing or
@@ -1057,9 +1058,11 @@ Tracked against §6. Each item links the working changes that shipped it.
     landing header (APIs/tools/scripts/knowledge from `/ui/manifest`), and a
     results pane fed by `EventSource /ui/events` rendering `view` payloads
     (table/list/markdown, error cards). `useRenderCustomMessages` is wired but
-    inert (CUSTOM event shape unresolved). Vite `base:"/ui/"`; built output
-    committed to `webui/dist/` so `go build` stays Node-free (`make webui`
-    rebuilds it). Live-verified against the running server (streamed run,
+    inert (CUSTOM event shape unresolved). Vite `base:"/ui/"`; built output lives
+    in `webui/dist/`, which is **git-ignored** (generated artifact). The binary
+    embeds it via `go:embed dist`; `make build` depends on the `webui` target,
+    so the compiled binary always carries the current bundle.
+    Live-verified against the running server (streamed run,
     error → info card, mock API → table).
   - Tests: `pkg/server/genui_test.go` (info, exact-name run, guidance fallback,
     vague query stays guidance + exact management-tool call, unknown agent 404,
@@ -1267,8 +1270,8 @@ Tracked against §6. Each item links the working changes that shipped it.
 work (result→view wrapper, `notifications/view` stream) are implemented and
 committed to `main`; **Phase 6 (Generative UI) is implemented and live-verified**
 — AG-UI Go runtime at `/ui/copilotkit`, deterministic planner, CopilotKit React
-front-end built into committed `webui/dist/`. Newest additions:
-`pkg/server/genui.go` + `genui_test.go`, `webui/` source + rebuilt `dist/`,
+front-end (bundle in git-ignored `webui/dist/`, embedded via `go:embed`).
+Newest additions: `pkg/server/genui.go` + `genui_test.go`, `webui/` source +
 `make webui`.
 
 **Remaining (in order):**

@@ -1,14 +1,14 @@
-// Package webui embeds the pre-built web UI shell served under /ui.
+// Package webui embeds the generated web UI served under /ui.
 //
-// The bundle in dist/ is dependency-free (no Node build step): it is a static
-// HTML/CSS/JS shell that talks to the /ui/manifest, /ui/chat and /ui/events
-// bridge endpoints. Phase 6 replaces/augments it with a CopilotKit generative-UI
-// front-end; keeping the bundle committed means `go build` never needs Node.
+// The bundle in dist/ is a git-ignored build artifact produced by `make webui`
+// (npm build). `make build` depends on the web build, so the binary always
+// embeds the current bundle and `go build ./...` simply works once dist/ exists
+// (run `make webui` first on a fresh checkout).
 package webui
 
 import "embed"
 
-// Dist holds the static web UI bundle (index.html, app.js, style.css, ...).
+// Dist holds the static web UI bundle (index.html, assets/...).
 //
 //go:embed dist
 var Dist embed.FS
