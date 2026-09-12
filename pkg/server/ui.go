@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ckanthony/openapi-mcp/pkg/knowledge"
 	"github.com/ckanthony/openapi-mcp/webui"
 	"github.com/google/uuid"
 )
@@ -358,8 +359,85 @@ func (r *Registry) UIManifest(connID string) map[string]interface{} {
 		"meta": map[string]interface{}{
 			"knowledge": map[string]interface{}{"enabled": metaEnabled},
 		},
+		"views":   r.uiViewEntries(connID),
 		"scripts": scripts,
 		"tools":   toolNames,
 		"server":  map[string]interface{}{"logLevel": r.ServerConfig().LogLevel},
 	}
+}
+
+// uiViewEntries lists the view/dashboard documents the calling session can
+// render, gathered across every API's merged knowledge library (persisted +
+// session overlay) plus the _meta base when enabled. Like apiEntryFor, an
+// enabled-but-not-yet-indexed library is loaded on demand so views show up
+// right after a restart (best-effort: a failing sync does not break the
+// manifest). Entries carry just enough for the UI to present and launch them.
+func (r *Registry) uiViewEntries(connID string) []map[string]interface{} {
+	r.mu.RLock()
+	names := make([]string, 0, len(r.apis))
+	for name := range r.apis {
+		names = append(names, name)
+	}
+	metaEnabled := r.meta.Knowledge.Enabled
+	metaLib := r.metaLibrary
+	r.mu.RUnlock()
+	sort.Strings(names)
+
+	out := []map[string]interface{}{}
+	seen := map[string]bool{}
+	add := func(apiName string, lib *knowledge.Library) {
+		if lib == nil {
+			return
+		}
+		for _, d := range lib.Views() {
+			key := apiName + "/" + d.ID
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			layout := ""
+			autoShow := false
+			if d.View != nil {
+				layout = d.View.Layout
+				autoShow = d.View.AutoShow
+			}
+			title := knowledge.ExtractTitle(d.Body)
+			if title == "" {
+				title = d.ID
+			}
+			out = append(out, map[string]interface{}{
+				"id":        d.ID,
+				"api":       apiName,
+				"kind":      string(d.Kind),
+				"title":     title,
+				"summary":   d.Summary,
+				"layout":    layout,
+				"auto_show": autoShow,
+			})
+		}
+	}
+
+	for _, name := range names {
+		entry, err := r.apiEntryFor(name)
+		if err != nil || entry == nil {
+			continue
+		}
+		add(name, r.mergedLibrary(entry, connID))
+	}
+	if metaEnabled {
+		if metaLib == nil {
+			if e, err := r.metaEntryFor(); err == nil {
+				metaLib = e.Knowledge
+			}
+		}
+		add(metaAPIName, metaLib)
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i]["api"] != out[j]["api"] {
+			return out[i]["api"].(string) < out[j]["api"].(string)
+		}
+		return out[i]["id"].(string) < out[j]["id"].(string)
+	})
+	return out
 }

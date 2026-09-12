@@ -1067,6 +1067,21 @@ Tracked against §6. Each item links the working changes that shipped it.
   - Tests: `pkg/server/genui_test.go` (info, exact-name run, guidance fallback,
     vague query stays guidance + exact management-tool call, unknown agent 404,
     connect, stop).
+- **Phase 6 remainder — result-centric UI (board over chat)**:
+  The web UI is now a **generative display surface**, not a chat window: the
+  Workbench board (`webui/src/components/Board.tsx`) is the primary stage,
+  rendering every session result (dashboards, task outputs, tables) as cards on
+  a responsive grid fed by `EventSource /ui/events`. The side Dock
+  (`webui/src/components/Dock.tsx`) has two tabs — **Library**
+  (`webui/src/components/Library.tsx`), which lists the dashboards/views/scripts
+  the session can produce and *launches* them through `/ui/chat` (backing
+  `view` tool call → board), and **Ask AI**, a collapsible CopilotKit chat that
+  is now one option among many rather than the main surface. `GET /ui/manifest`
+  gained a session-aware `views` list (`Registry.uiViewEntries`:
+  `pkg/server/ui.go`), gathered across every API's merged knowledge library
+  (lazy-loaded like `apiEntryFor`) plus the `_meta` base. Live-verified: chat
+  runs and Library launches both produce result cards on the board while the
+  chat timeline stays secondary.
 - **Phase 1 — Meta KB** (commits `985ed9c`, part of `417653a`): `_meta`
   virtual entry, `meta_init` / `meta_status` / `meta_sync`, `kind: view`/
   `kind: dashboard` model kinds in `pkg/knowledge` (`model.go`, `links.go`,
@@ -1250,55 +1265,65 @@ Tracked against §6. Each item links the working changes that shipped it.
 
 ### In progress / next
 
-- Dashboard auto-display surfaced through `/ui` and the front-end serializer +
-  interactive input controls re-issuing backing calls (the server-side
-  result→view wrapper, `notifications/view` stream and `run_task` `auto_show`
-  are done).
+- **Result-centric UI (board over chat) — landed.** The web UI is now a
+  generative display surface: Workbench board + Dock (Library/Ask AI tabs),
+  `GET /ui/manifest` `views` list, Library-launched dashboard runs
+  (see *Completed*). Still open under this direction:
+  - Live dashboard *render* variants in `ViewRender` (chart/card grids for
+    `layout: chart` / `layout: cards`) and interactive `inputs` controls on the
+    board that re-issue the backing call with filled values.
+  - AG-UI `CUSTOM "view"` cards inside the chat timeline (see below) so a chat
+    run also shows rich cards inline, not just on the board.
+  - code-splitting the large `@copilotkit`/highlight.js/markdown bundle (Vite
+    emits >500 kB chunk warnings).
 - Phase 6 remainder: resolve the AG-UI `CUSTOM "view"` message shape in the
   client so `useRenderCustomMessages` renders rich cards inside the chat
-  timeline (payloads currently reach the results pane via `/ui/events` instead);
+  timeline (payloads currently land on the board via `/ui/events` instead);
   chart/view-kind rendering for dashboard layouts; larger-bundle code-splitting
   (`vite` chunk-size warnings).
 - Phase 6 — Generative UI: enrich the local planner beyond first-pass
   heuristics when an LLM provider is unavailable (entity extraction for `zone`
   etc.), and consider exposing planner overrides as a runtime config.
+- Dashboard auto-display surfaced through `/ui`: the `run_task` `auto_show`
+  block and session `notifications/view` stream are done; surfacing each
+  auto-shown dashboard as a *board card* (not just `run_task` text) is the
+  remaining glue, along with planner routing of dashboard/view requests to the
+  `view` tool.
 
 ### Resume here (next working session)
 
 **Status:** Phases 1 (meta KB), 2 (dynamic exposure), 3 (scripting core), 4
 (scripting hardening), 5 (web UI shell) and the Phase 7 model + dashboard/view
 work (result→view wrapper, `notifications/view` stream) are implemented and
-committed to `main`; **Phase 6 (Generative UI) is implemented and live-verified**
-— AG-UI Go runtime at `/ui/copilotkit`, deterministic planner, CopilotKit React
-front-end (bundle in git-ignored `webui/dist/`, embedded via `go:embed`).
-Newest additions: `pkg/server/genui.go` + `genui_test.go`, `webui/` source +
-`make webui`.
+committed to `main`; **Phase 6 (Generative UI) is implemented and live-verified.**
+Newest addition: the UI was rebuilt **result-centric** — the Workbench board is
+the primary surface, and the copilot chat is demoted to an "Ask AI" tab of the
+side Dock next to a Library tab that launches dashboards/views onto the board
+(`Registry.uiViewEntries` → `/ui/manifest` `views`; Board/Dock/Library in
+`webui/src/components/`). Bundle in git-ignored `webui/dist/`, embedded via
+`go:embed`; `make build` runs `make webui` first.
 
 **Remaining (in order):**
 
-1. ~~Add `webui` build target to the Makefile~~ (done, committed with dist).
-2. **Surface dashboard auto-display through the UI.** Server-side pieces are done
-   (`pkg/server/tasks.go` `autoShowViews`, `run_task` `auto_show` block,
-   `pkg/server/knowledge_tools.go` `view` render payload); the only gap is surfacing:
-   - Have the GenUI runtime's `planRun` recognise dashboard/view requests
-     (`pkg/server/genui.go`) and route them to the `view` tool (it currently
-     reaches it only via exact name/keyword on the `view` tool itself, and only
-     when the tool set exposes it).
-   - Front-end: when a `view` payload with `layout: dashboard` + `columns``
-     /`rows` arrives on `/ui/events`, `webui/src/components/ViewRender.tsx` only
-     renders tables/lists/markdown — add dashboard/card rendering, then
-     interactive input controls (`src/components/GenUI.tsx` `view` card) that
-     re-issue the backing call with filled `inputs`.
+1. **Board-native dashboard rendering + interactive inputs.** `ViewRender.tsx`
+   renders `table`/`rows`/`markdown`; add `layout: cards`/`layout: chart`
+   variants and, on `view` cards, input controls (from the payload's `inputs`
+   list) that re-issue the backing call with filled values onto the board.
+2. **Surfacing `run_task` auto-shows and planner dashboard routing.**
+   `run_task` auto mode already appends an `--- auto-displayed views ---` block
+   and the `view` tool emits render payloads; route dashboard/view requests in
+   the GenUI planner (`planRun`, `pkg/server/genui.go`) to the `view` tool and
+   turn every auto-shown dashboard into a board card.
 3. **AG-UI `CUSTOM "view"` cards in the chat timeline.** The runtime already
    emits `NewCustomEvent("view", WithValue(view))` per tool call
    (`pkg/server/genui.go` `streamGenUIToolCall`). The client keeps
-   `useRenderCustomMessages()` wired but inert because the message shape for a
+   `useRenderCustomMessages()` wiring inert because the message shape for a
    CUSTOM event in the shipped `@ag-ui/core`/headless bundle was never pinned
    (search `node_modules/@copilotkit/react-core/dist/*.d.mts` and
    `node_modules/@ag-ui/core/dist/index.d.mts`, the runtime-client-gql
    `message-conversion/`). Implement `renderCustomMessages` to handle
    `type === "CUSTOM"` messages and render the same `ViewRender` component the
-   results pane uses — then the chat shows rich cards inline instead of the
+   board uses — then the chat shows rich cards inline instead of the
    `useComponent` placeholder.
 4. **Chart layouts for dashboard views.** `viewParams` (`pkg/server/views.go`)
    only produces `table`/`list`/`markdown`; add a `chart` projection (e.g. from

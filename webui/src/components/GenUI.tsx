@@ -5,8 +5,8 @@ import { z } from "zod";
 // timeline while an agent call runs:
 //  - tool calls named `view` render a small view/dashboard card
 //  - tool calls named `run_task` render a compact run card (mode + task)
-// The rich payloads themselves land in the results pane (a CUSTOM "view" AG-UI
-// event is also emitted on every call; the pane shows it via /ui/events).
+// The rich payloads themselves land on the workbench board (a CUSTOM "view"
+// AG-UI event is emitted on every call; the board shows it via /ui/events).
 
 const viewArgs = z.object({
   api: z.string().optional(),

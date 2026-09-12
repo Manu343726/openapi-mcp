@@ -247,15 +247,27 @@ These are deliberate constraints — the tests and behavior rely on them.
   make target depends on `webui`, so the compiled binary always embeds the
   current bundle. On a fresh checkout run `make webui` (or `make build`) once
   before a bare `go build ./...`.
+- **Result-centric front-end (board over chat)**: the SPA is a generative
+  display surface. The **Workbench board** (`webui/src/components/Board.tsx`)
+  is the primary stage — every result card comes from `EventSource /ui/events`
+  `notifications/view` payloads, rendered by `ViewRender`. The side **Dock**
+  (`webui/src/components/Dock.tsx`) carries two tabs: **Library**
+  (`Library.tsx`), which lists the session's dashboards/views/scripts from
+  `/ui/manifest` `views` and launches them via `/ui/chat` (backing `view` tool
+  call → board), and **Ask AI** (`GenUI.tsx` + CopilotChat), demoted to one
+  option among many. `Registry.uiViewEntries` (`pkg/server/ui.go`) builds the
+  manifest `views` list from each API's merged knowledge library (persisted +
+  session overlay, lazy-loaded like `apiEntryFor`) plus the `_meta` base —
+  keep it session-aware and cheap (best-effort loads, no failures on sync).
 - **Endpoints**: `/ui` (SPA), `/ui/` (assets), `/ui/manifest` (session-aware
-  registry snapshot), `/ui/chat` (POST `{tool,arguments}` or `{message}`; drives
-  `Registry.CallTool`), `/ui/events` (per-session SSE of broadcast
-  notifications), and the **AG-UI CopilotKit runtime** `/ui/copilotkit`:
-  `GET /info`, `POST /agent/default/run`, `POST /agent/default/connect`,
-  `POST /agent/default/stop/{thread}` (`pkg/server/genui.go`). The runtime
-  mirrors each tool outcome as a `CUSTOM "view"` event and calls
-  `enqueueView` (same channel as `/ui/events`), so the front-end results pane
-  and the chat timeline stay in sync.
+  registry snapshot incl. `views`), `/ui/chat` (POST `{tool,arguments}` or
+  `{message}`; drives `Registry.CallTool`), `/ui/events` (per-session SSE of
+  broadcast notifications), and the **AG-UI CopilotKit runtime**
+  `/ui/copilotkit`: `GET /info`, `POST /agent/default/run`,
+  `POST /agent/default/connect`, `POST /agent/default/stop/{thread}`
+  (`pkg/server/genui.go`). The runtime mirrors each tool outcome as a
+  `CUSTOM "view"` event and calls `enqueueView` (same channel as `/ui/events`),
+  so the board and the chat timeline stay in sync.
 - **Planner**: `planRun` is a deterministic, LLM-free router over the *session*
   tool set — exact tool name → best `MatchingScript` → keyword-scored operation
   (`toolScore`; name token +3, description +1, threshold ≥2) → guidance

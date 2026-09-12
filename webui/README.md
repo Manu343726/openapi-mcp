@@ -9,21 +9,36 @@ checkout before `go build ./...`.
 
 ## What it is
 
-A React 18 + Vite 5 + TypeScript front-end built on **CopilotKit v2 (AG-UI)**:
+A **result-centric** React 18 + Vite 5 + TypeScript front-end: the UI is a
+generative display surface for the agent session, not a chat window. Every
+task, dashboard and result produced during the session lands on the Workbench
+board; chat is an *option* for talking to the agent, alongside launching a
+dashboard straight from the Library.
 
-- `<CopilotKit agentId="default" runtimeUrl="/ui/copilotkit"
-  headers={{ "X-Ui-Session": <token> }}>` + `CopilotChat` — the chat drives the
-  server's deterministic AG-UI runtime (`GET /info`, `POST /agent/default/run`,
-  `/connect`, `/stop/{thread}`), which streams `TEXT_MESSAGE_*` and
-  `TOOL_CALL_*` events plus a `CUSTOM "view"` event per tool call.
-- GenUI component map (`src/components/GenUI.tsx`): `useComponent` renderers for
-  the `view` and `run_task` tool calls (zod parameter schemas) rendered inline in
-  the timeline.
-- Landing header (`src/components/Landing.tsx`): API/tool/script/knowledge
-  counts from `GET /ui/manifest`.
-- Results pane (`src/components/ResultsPane.tsx`): `EventSource /ui/events`
-  streams the session's `view` notifications; `ViewRender` renders
-  table/list/markdown/error cards.
+- **Workbench board** (`src/components/Board.tsx`): the central stage.
+  `EventSource /ui/events` streams the session's `view` notifications and each
+  becomes a card (table/list/markdown/error via `ViewRender`) on a responsive
+  grid — the primary surface of the app.
+- **Dock** (`src/components/Dock.tsx`): the side panel with two tabs:
+  - **Library** (`src/components/Library.tsx`): the dashboards/views/scripts the
+    session can produce, read from `GET /ui/manifest` (`views`). Clicking *run*
+    re-issues the backing `view` tool call through `/ui/chat` and the result
+    appears on the board — the "AI-assisted data and interaction display" path
+    that needs no chat.
+  - **Ask AI** (`src/components/GenUI.tsx` + CopilotChat): the agent chat —
+    `<CopilotKit agentId="default" runtimeUrl="/ui/copilotkit"
+    headers={{ "X-Ui-Session": <token> }}>` drives the server's deterministic
+    AG-UI runtime (`GET /info`, `POST /agent/default/run`, `/connect`,
+    `/stop/{thread}`), which streams `TEXT_MESSAGE_*` and `TOOL_CALL_*` events
+    plus a `CUSTOM "view"` event per tool call. `useComponent` renderers paint
+    the `view`/`run_task` calls as compact cards in the timeline; the full data
+    still lands on the board.
+- Landing header (`src/components/Landing.tsx`): API/tool/script counts from
+  `GET /ui/manifest`.
+
+The manifest's `views` list is built server-side from each API's merged
+knowledge library (persisted + per-session overlay) plus the `_meta` base
+(`Registry.uiViewEntries`).
 
 Vite `base` is `/ui/` so embedded assets resolve under `/ui`. Dev mode
 (`npm run dev`) proxies `/ui` to a local server on :8080.
@@ -37,10 +52,11 @@ overlays, active targets and exposure — exactly like a headless MCP client.
 
 ## Layout
 
-- `src/main.tsx`, `src/App.tsx` — bootstrap, CopilotKit + CopilotChat wiring.
-- `src/components/` — GenUI cards, results pane, landing, view renderer.
-- `src/lib/session.ts`, `src/state/results.tsx` — token/manifest helpers and the
-  `/ui/events` results store.
+- `src/main.tsx`, `src/App.tsx` — bootstrap; board-first layout (Board + Dock).
+- `src/components/` — Board, Dock (Library + Ask AI tabs), GenUI cards, landing,
+  library tiles, view renderer.
+- `src/lib/session.ts`, `src/state/results.tsx` — token/manifest helpers
+  (incl. the `views` type) and the `/ui/events` results store backing the board.
 - `dist/` — **git-ignored** build output (rebuild via `make webui`), embedded
   into the binary with `go:embed`.
 - `embed.go` — `//go:embed dist` (compile-time embed of the generated bundle).

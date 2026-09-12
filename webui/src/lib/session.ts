@@ -42,10 +42,21 @@ export interface ViewPayload {
   view?: Record<string, unknown>;
 }
 
+export interface ManifestView {
+  id: string;
+  api: string;
+  kind: string; // "view" | "dashboard"
+  title: string;
+  summary?: string;
+  layout?: string;
+  auto_show?: boolean;
+}
+
 export interface Manifest {
   session: string;
   apis: ManifestApi[];
   meta: { knowledge?: { enabled?: boolean } };
+  views: ManifestView[];
   scripts: { name: string; api: string; summary: string; exposed: boolean }[];
   tools: string[];
 }

@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -85,6 +87,42 @@ func TestUIManifestSessionAware(t *testing.T) {
 
 	// Distinct server-side sessions.
 	assert.NotEqual(t, bridge.sessions["a"].connID, bridge.sessions["b"].connID)
+}
+
+func TestUIManifestViewEntries(t *testing.T) {
+	specPath := writeSpecFile(t, "spec.json", registryTestV3Spec)
+	reg, root := newScriptRegistry(t, specPath)
+
+	// A persisted dashboard doc in the API's knowledge library (the data back
+	// of the front-end Library tab).
+	dir := filepath.Join(root, "dashboards")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	dashMD := `---
+id: activity-dash
+kind: dashboard
+api: acme
+view:
+  source: acme__listUserActions
+  layout: cards
+  auto_show: true
+---
+# Activity dashboard
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "activity-dash.md"), []byte(dashMD), 0o644))
+	_, err := reg.LoadKnowledge("acme")
+	require.NoError(t, err)
+
+	srv, _ := newUIServer(t, reg)
+	base := getJSON(t, uiRequest(t, "GET", srv.URL+"/ui/manifest", "a", ""))
+	views := base["views"].([]interface{})
+	require.Len(t, views, 1)
+	entry := views[0].(map[string]interface{})
+	assert.Equal(t, "activity-dash", entry["id"])
+	assert.Equal(t, "acme", entry["api"])
+	assert.Equal(t, "dashboard", entry["kind"])
+	assert.Equal(t, "Activity dashboard", entry["title"])
+	assert.Equal(t, "cards", entry["layout"])
+	assert.Equal(t, true, entry["auto_show"])
 }
 
 func TestUIChatDispatchesTools(t *testing.T) {
