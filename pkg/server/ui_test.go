@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -217,13 +218,19 @@ func TestUIStaticIndex(t *testing.T) {
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	body, _ := io.ReadAll(resp.Body)
-	assert.Contains(t, string(body), "/ui/app.js")
+	index := string(body)
+	assert.Contains(t, index, "<div id=\"root\">")
 
-	// The static subtree serves the bundle assets.
-	asset, err := http.Get(srv.URL + "/ui/app.js")
+	// The static subtree serves the bundle assets referenced by the index.
+	src := assetSrcRegexp.FindStringSubmatch(index)
+	require.Len(t, src, 2, "index.html must reference a script asset")
+	asset, err := http.Get(srv.URL + src[1])
 	require.NoError(t, err)
 	defer asset.Body.Close()
 	require.Equal(t, http.StatusOK, asset.StatusCode)
 	js, _ := io.ReadAll(asset.Body)
 	assert.Contains(t, string(js), "/ui/manifest")
+	assert.Contains(t, string(js), "/ui/events")
 }
+
+var assetSrcRegexp = regexp.MustCompile(`<script[^>]+src="([^"]+)"`)

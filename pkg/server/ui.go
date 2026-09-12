@@ -52,6 +52,7 @@ func (b *UIBridge) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/ui/manifest", b.handleManifest)
 	mux.HandleFunc("/ui/chat", b.handleChat)
 	mux.HandleFunc("/ui/events", b.handleEvents)
+	b.registerGenUIRoutes(mux)
 	if sub, err := fs.Sub(webui.Dist, "dist"); err == nil {
 		mux.Handle("/ui/", http.StripPrefix("/ui/", http.FileServer(http.FS(sub))))
 	}

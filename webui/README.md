@@ -1,24 +1,47 @@
-# webui — interactive web UI shell
+# webui — generative UI
 
 This directory holds the **pre-built static bundle** served by the Go server at
 `/ui`. It is committed so `go build` never needs Node (`webui/embed.go` embeds
-`dist/` with `go:embed`).
+`dist/` with `go:embed`). Rebuild it with `make webui` (requires Node 20+).
 
-The Phase 5 shell is dependency-free (plain HTML/CSS/JS):
+## What it is
 
-- `dist/index.html` / `dist/style.css` / `dist/app.js`
-- It reads `GET /ui/manifest` (session-aware registry context), calls tools with
-  `POST /ui/chat`, and listens for broadcast notifications (e.g.
-  `notifications/tools/list_changed`) on `GET /ui/events` via SSE.
+A React 18 + Vite 5 + TypeScript front-end built on **CopilotKit v2 (AG-UI)**:
 
-Each browser tab gets its own opaque session token in `sessionStorage`, sent as
-`X-Ui-Session` (or `?session=`), which the server maps to a dedicated MCP
-`connID`. That gives every tab isolated per-session overlays, active targets and
-exposure, exactly like a headless MCP client.
+- `<CopilotKit agentId="default" runtimeUrl="/ui/copilotkit"
+  headers={{ "X-Ui-Session": <token> }}>` + `CopilotChat` — the chat drives the
+  server's deterministic AG-UI runtime (`GET /info`, `POST /agent/default/run`,
+  `/connect`, `/stop/{thread}`), which streams `TEXT_MESSAGE_*` and
+  `TOOL_CALL_*` events plus a `CUSTOM "view"` event per tool call.
+- GenUI component map (`src/components/GenUI.tsx`): `useComponent` renderers for
+  the `view` and `run_task` tool calls (zod parameter schemas) rendered inline in
+  the timeline.
+- Landing header (`src/components/Landing.tsx`): API/tool/script/knowledge
+  counts from `GET /ui/manifest`.
+- Results pane (`src/components/ResultsPane.tsx`): `EventSource /ui/events`
+  streams the session's `view` notifications; `ViewRender` renders
+  table/list/markdown/error cards.
 
-## Phase 6 (CopilotKit)
+Vite `base` is `/ui/` so embedded assets resolve under `/ui`. Dev mode
+(`npm run dev`) proxies `/ui` to a local server on :8080.
 
-Phase 6 replaces/augments this bundle with a CopilotKit generative-UI front-end
-(`@copilotkit/react-core`, `react-ui`, `react-textarea`). When that lands, add a
-Node build (`make webui`) that emits into `dist/`; the Go bridge endpoints stay
-the same. Keep `dist/` committed so the default `go build` path stays Node-free.
+## How the session token flows
+
+Each browser tab mints an opaque session token (kept in memory +
+`sessionStorage`) and sends it as `X-Ui-Session` on every request. The server
+maps it to a dedicated MCP `connID`, giving every tab isolated per-session
+overlays, active targets and exposure — exactly like a headless MCP client.
+
+## Layout
+
+- `src/main.tsx`, `src/App.tsx` — bootstrap, CopilotKit + CopilotChat wiring.
+- `src/components/` — GenUI cards, results pane, landing, view renderer.
+- `src/lib/session.ts`, `src/state/results.tsx` — token/manifest helpers and the
+  `/ui/events` results store.
+- `dist/` — committed build output (rebuild via `make webui`).
+
+## Scripts
+
+- `npm run dev` — Vite dev server (proxies `/ui` → `localhost:8080`).
+- `npm run build` — typecheck + production build into `dist/`.
+- `npx tsc --noEmit` — typecheck only.

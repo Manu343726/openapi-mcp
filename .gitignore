@@ -34,3 +34,6 @@ example/acme/kb-checkout/
 .opencode/
 # Delve debug artifacts
 __debug_bin*
+
+# Playwright MCP test artifacts
+.playwright-mcp/

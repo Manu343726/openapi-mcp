@@ -1032,6 +1032,38 @@ Tracked against §6. Each item links the working changes that shipped it.
 
 ### Completed
 
+- **Phase 6 — Generative UI (CopilotKit / AG-UI)**:
+  - Go runtime `pkg/server/genui.go`: an AG-UI (v2) streaming runtime mounted at
+    `/ui/copilotkit` (endpoints `GET /info`, `POST /agent/default/run`,
+    `POST /agent/default/connect`, `POST /agent/default/stop/{thread}`), using
+    `github.com/ag-ui-protocol/ag-ui/sdks/community/go` for event
+    construction/validation and SSE framing. Streams `RUN_STARTED`, assistant
+    `TEXT_MESSAGE_*`, a full `TOOL_CALL_START/ARGS/END/RESULT` lifecycle per
+    planned action, `RUN_FINISHED`/`RUN_ERROR`, and a `CUSTOM "view"` event per
+    call so mirrors land on the session view stream. Session/token handling is
+    shared with the existing `/ui` bridge (`sessionFor`),
+    `max_sessions`/`X-Ui-Session` respected.
+  - Deterministic planner `planRun` (no LLM): exact session-tool name →
+    best `MatchingScript` → keyword-scored operation (`toolScore`: name token
+    +3, description token +1, threshold ≥2) → `helpText` guidance. Management
+    tools are excluded from fuzzy matching (they would be auto-invoked by
+    off-topic prompts) but remain reachable by exact name. Tool calls never
+    reference a name the registry did not resolve. Result text is guaranteed
+    non-empty so `TOOL_CALL_RESULT` always validates.
+  - React front-end under `webui/` (React 18 + Vite 5 + TypeScript,
+    `@copilotkit/react-core`/`react-ui` v2, `@ag-ui/core`): `<CopilotKit
+    agentId="default" runtimeUrl="/ui/copilotkit" headers={{X-Ui-Session}}>`
+    + `CopilotChat`, GenUI `useComponent` renderers (`view`, `run_task` cards),
+    landing header (APIs/tools/scripts/knowledge from `/ui/manifest`), and a
+    results pane fed by `EventSource /ui/events` rendering `view` payloads
+    (table/list/markdown, error cards). `useRenderCustomMessages` is wired but
+    inert (CUSTOM event shape unresolved). Vite `base:"/ui/"`; built output
+    committed to `webui/dist/` so `go build` stays Node-free (`make webui`
+    rebuilds it). Live-verified against the running server (streamed run,
+    error → info card, mock API → table).
+  - Tests: `pkg/server/genui_test.go` (info, exact-name run, guidance fallback,
+    vague query stays guidance + exact management-tool call, unknown agent 404,
+    connect, stop).
 - **Phase 1 — Meta KB** (commits `985ed9c`, part of `417653a`): `_meta`
   virtual entry, `meta_init` / `meta_status` / `meta_sync`, `kind: view`/
   `kind: dashboard` model kinds in `pkg/knowledge` (`model.go`, `links.go`,
@@ -1215,37 +1247,66 @@ Tracked against §6. Each item links the working changes that shipped it.
 
 ### In progress / next
 
-- Phase 7 remainder (UI side): dashboard auto-display surfaced through `/ui` and
-  the front-end serializer + interactive input controls re-issuing backing calls
-  (the server-side result→view wrapper and `notifications/view` stream are done).
-- Phase 6 — Generative UI: replace/augment the dependency-free shell in
-  `webui/dist` with a CopilotKit front-end (`@copilotkit/react-core`,
-  `react-ui`, `react-textarea`) and build the GenUI component map for tool
-  calls, scripts, knowledge results, `run_task` plans, exposure changes and
-  `view`/`dashboard` payloads, plus the context-dependent landing view. The Go
-  bridge endpoints (`/ui/manifest`, `/ui/chat`, `/ui/events`) stay as-is.
+- Dashboard auto-display surfaced through `/ui` and the front-end serializer +
+  interactive input controls re-issuing backing calls (the server-side
+  result→view wrapper, `notifications/view` stream and `run_task` `auto_show`
+  are done).
+- Phase 6 remainder: resolve the AG-UI `CUSTOM "view"` message shape in the
+  client so `useRenderCustomMessages` renders rich cards inside the chat
+  timeline (payloads currently reach the results pane via `/ui/events` instead);
+  chart/view-kind rendering for dashboard layouts; larger-bundle code-splitting
+  (`vite` chunk-size warnings).
+- Phase 6 — Generative UI: enrich the local planner beyond first-pass
+  heuristics when an LLM provider is unavailable (entity extraction for `zone`
+  etc.), and consider exposing planner overrides as a runtime config.
 
 ### Resume here (next working session)
 
 **Status:** Phases 1 (meta KB), 2 (dynamic exposure), 3 (scripting core), 4
-(scripting hardening) and 5 (web UI shell) are implemented, tested and committed
-to `main`; the Phase 7 model, `view` tool, `run_task` auto-display and the
-result→view wrapper + `notifications/view` stream are done. Remaining Phase 6
-work is the CopilotKit/GenUI front-end and dashboard auto-display through `/ui`.
-Newest additions: `webui/` (embed + `dist/`), `pkg/server/ui.go`,
-`pkg/server/views.go` and their tests.
+(scripting hardening), 5 (web UI shell) and the Phase 7 model + dashboard/view
+work (result→view wrapper, `notifications/view` stream) are implemented and
+committed to `main`; **Phase 6 (Generative UI) is implemented and live-verified**
+— AG-UI Go runtime at `/ui/copilotkit`, deterministic planner, CopilotKit React
+front-end built into committed `webui/dist/`. Newest additions:
+`pkg/server/genui.go` + `genui_test.go`, `webui/` source + rebuilt `dist/`,
+`make webui`.
 
-**Next up: Phase 6 — Generative UI (§4.3, §4.5, §7).** Suggested order:
+**Remaining (in order):**
 
-1. Add the CopilotKit React app under `webui/` with a Node build emitted into
-   `dist/` (`make webui`); keep `dist/` committed so the default `go build`
-   stays Node-free.
-2. Build the component map: tool-call cards (method/path from the enriched tool
-   description), script cards, `knowledge_search` link lists, `run_task` step
-   checklists, exposure-change indicators, and `view`/`dashboard` render
-   payloads (table/list/cards/chart) with live inputs re-issuing the backing call.
-3. Implement the result→view wrapper so every tool/task/script outcome emits a
-   `view` event on `/ui/events`; wire dashboard auto-display through the UI.
+1. ~~Add `webui` build target to the Makefile~~ (done, committed with dist).
+2. **Surface dashboard auto-display through the UI.** Server-side pieces are done
+   (`pkg/server/tasks.go` `autoShowViews`, `run_task` `auto_show` block,
+   `pkg/server/knowledge_tools.go` `view` render payload); the only gap is surfacing:
+   - Have the GenUI runtime's `planRun` recognise dashboard/view requests
+     (`pkg/server/genui.go`) and route them to the `view` tool (it currently
+     reaches it only via exact name/keyword on the `view` tool itself, and only
+     when the tool set exposes it).
+   - Front-end: when a `view` payload with `layout: dashboard` + `columns``
+     /`rows` arrives on `/ui/events`, `webui/src/components/ViewRender.tsx` only
+     renders tables/lists/markdown — add dashboard/card rendering, then
+     interactive input controls (`src/components/GenUI.tsx` `view` card) that
+     re-issue the backing call with filled `inputs`.
+3. **AG-UI `CUSTOM "view"` cards in the chat timeline.** The runtime already
+   emits `NewCustomEvent("view", WithValue(view))` per tool call
+   (`pkg/server/genui.go` `streamGenUIToolCall`). The client keeps
+   `useRenderCustomMessages()` wired but inert because the message shape for a
+   CUSTOM event in the shipped `@ag-ui/core`/headless bundle was never pinned
+   (search `node_modules/@copilotkit/react-core/dist/*.d.mts` and
+   `node_modules/@ag-ui/core/dist/index.d.mts`, the runtime-client-gql
+   `message-conversion/`). Implement `renderCustomMessages` to handle
+   `type === "CUSTOM"` messages and render the same `ViewRender` component the
+   results pane uses — then the chat shows rich cards inline instead of the
+   `useComponent` placeholder.
+4. **Chart layouts for dashboard views.** `viewParams` (`pkg/server/views.go`)
+   only produces `table`/`list`/`markdown`; add a `chart` projection (e.g. from
+   `{x, y, series}` rows) and render it in `ViewRender`.
+5. **Planner enrichment + build hygiene (optional).** `toolScore`
+   (`pkg/server/genui.go`) is pure keyword overlap; consider entity extraction
+   into `args` (e.g. `zone: "A"`) so single tool calls carry context, and
+   make the planner's resolution order/data explicit in the agent `info` payload.
+   Vite emits chunk-size warnings — code-split off
+   `@copilotkit/react-ui` / highlight.js / markdown-heavy deps
+   (`webui/vite.config.ts`).
 
 **Working notes (Phase 3–5 were developed here):**
 

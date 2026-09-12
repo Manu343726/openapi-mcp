@@ -40,6 +40,13 @@ run-server: build
 	@mkdir -p $(dir $(CONFIG_FILE))
 	$(BIN) --config $(CONFIG_FILE) --port $(PORT)
 
+### Rebuild the CopilotKit generative UI (requires Node 20+). Output lands in
+### webui/dist, which is go:embed'd into the server and must stay committed so
+### the default `go build` remains Node-free.
+webui:
+	cd webui && npm run build
+	@echo "web UI rebuilt into webui/dist"
+
 ### Run the test suite.
 test:
 	$(GO) test ./...

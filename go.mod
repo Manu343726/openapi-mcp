@@ -3,6 +3,7 @@ module github.com/ckanthony/openapi-mcp
 go 1.25.0
 
 require (
+	github.com/ag-ui-protocol/ag-ui/sdks/community/go v0.0.0-20260911195732-bc17b0a539cc
 	github.com/d5/tengo/v2 v2.17.0
 	github.com/getkin/kin-openapi v0.149.0
 	github.com/go-git/go-git/v5 v5.19.2
@@ -45,6 +46,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3 // indirect
 	github.com/sergi/go-diff v1.3.2-0.20230802210424-5b0b94c5c0d3 // indirect
+	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/skeema/knownhosts v1.3.1 // indirect
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	go.mongodb.org/mongo-driver v1.14.0 // indirect

@@ -242,12 +242,24 @@ These are deliberate constraints — the tests and behavior rely on them.
   `X-Ui-Session`), `max_sessions` (default 100), `token_env` (optional bearer
   token). `ServeMCP` mounts the routes when `UI.IsEnabled()`.
 - **Static bundle is committed and embedded** (`webui/embed.go`, `//go:embed
-  dist`): the default shell is dependency-free HTML/CSS/JS, so `go build` never
-  needs Node. Phase 6 will add a CopilotKit build emitted into `webui/dist`.
+  dist`): the Phase 6 bundle is a CopilotKit (AG-UI) React app built with
+  `make webui` (Node 20+); keep `dist/` committed so the default `go build`
+  never needs Node.
 - **Endpoints**: `/ui` (SPA), `/ui/` (assets), `/ui/manifest` (session-aware
   registry snapshot), `/ui/chat` (POST `{tool,arguments}` or `{message}`; drives
   `Registry.CallTool`), `/ui/events` (per-session SSE of broadcast
-  notifications).
+  notifications), and the **AG-UI CopilotKit runtime** `/ui/copilotkit`:
+  `GET /info`, `POST /agent/default/run`, `POST /agent/default/connect`,
+  `POST /agent/default/stop/{thread}` (`pkg/server/genui.go`). The runtime
+  mirrors each tool outcome as a `CUSTOM "view"` event and calls
+  `enqueueView` (same channel as `/ui/events`), so the front-end results pane
+  and the chat timeline stay in sync.
+- **Planner**: `planRun` is a deterministic, LLM-free router over the *session*
+  tool set — exact tool name → best `MatchingScript` → keyword-scored operation
+  (`toolScore`; name token +3, description +1, threshold ≥2) → guidance
+  (`helpText`). Management tools are excluded from fuzzy matching but stay
+  reachable by exact name. Never route to a name the registry didn't resolve,
+  and never emit an empty `TOOL_CALL_RESULT` content (validation requires it).
 - **Result→view**: `pkg/server/views.go` projects each tool outcome into a
   structured payload (arrays of objects → `table`; a single JSON object →
   `list`; a `view` tool render payload passes through; otherwise `markdown`) and
