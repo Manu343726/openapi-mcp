@@ -170,7 +170,10 @@ func ServeMCP(addr string, reg *Registry) error {
 	// Setup server mux
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", mcpHandler) // Single endpoint for GET/POST/OPTIONS
-	if reg.ServerConfig().UI.IsEnabled() {
+	// The web UI is a beta feature: it is served only when opted in via
+	// server.features.experimental (web_ui, or the master enabled switch), or
+	// via a legacy explicit server.ui.enabled: true. Disabled by default.
+	if reg.ServerConfig().WebUIEnabled() {
 		NewUIBridge(reg).RegisterRoutes(mux)
 		serverLog.Info("web UI enabled", "path", "/ui")
 	} else {
@@ -1300,6 +1303,9 @@ func handleToolCallJSONRPC(connID string, req *jsonRPCRequest, reg *Registry) js
 	if err := json.Unmarshal(rawParams, &params); err != nil {
 		serverLog.Error("error unmarshalling tools/call params", "conn_id", connID, "error", err)
 		return createJSONRPCError(req.ID, -32602, "Invalid parameters structure (unmarshal)", err.Error())
+	}
+	if strings.TrimSpace(params.ToolName) == "" {
+		return createJSONRPCError(req.ID, -32602, "Invalid params: tool name is required", nil)
 	}
 
 	serverLog.Info("executing tool", "tool", params.ToolName, "conn_id", connID)

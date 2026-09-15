@@ -138,8 +138,13 @@ func exposeScriptTool(ref *scriptRef, fullName string) mcp.Tool {
 
 // scriptExposedLocked evaluates a script's runtime exposure. Meta scripts are
 // always exposed; per-API scripts follow the owning API's (session-effective)
-// exposure projection, bucketed under the "script" tag. Callers hold r.mu.
+// exposure projection, bucketed under the "script" tag. The whole script layer
+// is behind the scripts feature flag: when it is off, no script tool is
+// discoverable or callable. Callers hold r.mu.
 func (r *Registry) scriptExposedLocked(ref *scriptRef, connID string) bool {
+	if !r.server.Features.ScriptsEnabled() {
+		return false
+	}
 	if ref.meta {
 		return true
 	}

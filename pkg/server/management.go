@@ -548,6 +548,11 @@ type managementToolResult struct {
 // runManagementTool executes a management tool and returns the text result for
 // the MCP client. Registry mutations trigger a tools/list_changed broadcast.
 func (r *Registry) runManagementTool(connID, name string, args map[string]interface{}) managementToolResult {
+	// Feature gate: tools behind a disabled feature are rejected with a clear
+	// message (they are also hidden from tools/list via gatedToolsLocked).
+	if toolFeatureGated(name) && !featuresEnabled(r.ServerConfig().Features, name) {
+		return errResult(fmt.Errorf("tool %q is part of the %q feature, which is disabled in this server; enable it with server.features.%s in the config file, then re-open the MCP client", name, managementToolFeature[name], managementToolFeature[name]))
+	}
 	var err error
 	if isKnowledgeTool(name) {
 		return r.runKnowledgeTool(connID, name, args)

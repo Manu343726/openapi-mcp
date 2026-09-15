@@ -112,7 +112,31 @@ before anything hits the network.
 To debug the request the server would actually emit, use `preview_api_call` for
 a fully offline check; to hit a real API, call the tool.
 
-### 3. Reference OpenAPI specs for manual / integration testing
+### 3. Automated MCP protocol tests
+
+The Go test suite drives the real server over real HTTP — no MCP client needed:
+
+- `pkg/server/mcp_harness_test.go` runs the exact machine-handshake a harness
+  makes on connect (initialize → `tools/list` → `tools/call`), asserts the
+  standard JSON-RPC error surface (-32601 unknown method, -32602 invalid tool
+  name, empty `ping` result), and measures the `tools/list` discovery payload
+  that lands in an agent's context window.
+- `pkg/server/session_bind_test.go` exercises streamable-HTTP sessions
+  (`Mcp-Session-Id` issuance/echo, deferred responses) and per-session view
+  streams.
+- `pkg/server/features_test.go` pins the tool surface per feature flag and the
+  discovery-payload size budgets.
+
+The **official MCP conformance suite**
+([`modelcontextprotocol/conformance`](https://github.com/modelcontextprotocol/conformance),
+Node/npx) validates spec compliance against a live server —
+`npx @modelcontextprotocol/conformance <server-url> [--configFiles ...]`. It is
+optional here because the Go package has no Node dependency for tests, but run
+it against a booted server as a pre-release check. (The MCP SDK clients —
+Python `mcp`, Node `@modelcontextprotocol/sdk` — are alternative external
+harnesses.)
+
+### 4. Reference OpenAPI specs for manual / integration testing
 
 The [awesome-openapi-specs](https://github.com/bhavyshekhaliya/awesome-openapi-specs)
 catalog lists real-world provider specs (it has no petstore-style stubs — those
@@ -147,6 +171,30 @@ Suggestions for what to test against each:
 
 Use `make run-server` and `register_openapi_api` at runtime to iterate without
 editing the config file by hand.
+
+## Feature flags
+
+Feature flags (`server.features` in the config file) control which tool groups
+are exposed in `tools/list` and which management tools are callable. See the
+full reference in [`docs/config-file.md`](config-file.md).
+
+**Key behavior:**
+
+- Every production feature is on by default; only the **beta web UI** (`web_ui`)
+  is off. The master switch (`enabled`) turns on beta features and is itself off
+  by default.
+- A disabled feature removes its tools from the discovery surface, shrinking the
+  prompt payload an AI agent downloads at startup. It also rejects direct
+  `tools/call` requests with a clear "feature disabled" error (not "unknown
+  tool").
+- The always-on core management tools (`relogin`, `test_api_target`,
+  `reload_config`, `set_log_level`, `preview_api_call`) are always exposed.
+- The web UI is additionally gated by a legacy `server.ui.enabled: false` (still
+  honored for backward compatibility; explicit false overrides `web_ui: true`).
+
+To exercise a gated path in tests, call `SetServerConfig` on the test registry
+with the relevant flags mutated — see `pkg/server/features_test.go` for the
+pattern.
 
 ## Known quirks
 
@@ -238,9 +286,12 @@ These are deliberate constraints — the tests and behavior rely on them.
 
 ## Web UI (`webui/`, `pkg/server/ui.go`)
 
-- `server.ui` (`pkg/config`): `enabled` (default true), `session_header` (default
-  `X-Ui-Session`), `max_sessions` (default 100), `token_env` (optional bearer
-  token). `ServeMCP` mounts the routes when `UI.IsEnabled()`.
+- `server.ui` (`pkg/config`): `enabled` (legacy; see below), `session_header`
+  (default `X-Ui-Session`), `max_sessions` (default 100), `token_env` (optional
+  bearer token). The UI is a **beta feature disabled by default** via the
+  `server.features` flags (`web_ui`, or the experimental master `enabled`);
+  `ServeMCP` mounts the routes when `ServerConfig.WebUIEnabled()` (an explicit
+  legacy `ui.enabled: true` is also honored).
 - **Static bundle is embedded; generated, not tracked** (`webui/embed.go`,
   `//go:embed dist`): the CopilotKit (AG-UI) bundle in `webui/dist/` is a
   git-ignored build artifact produced by `make webui` (Node 20+). The `build`

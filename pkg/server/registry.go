@@ -1349,6 +1349,25 @@ func (r *Registry) ReloadAPI(apiName string) (*APIReloadResult, error) {
 	}, nil
 }
 
+// gatedToolsLocked projects a tool slice through the feature flags: tools whose
+// feature group is disabled (and per-API script tools when the scripts feature
+// is off, so a stale snapshot cannot leak them) are filtered out of what
+// clients can discover. Always-on core tools are unaffected. Callers hold r.mu.
+func (r *Registry) gatedToolsLocked(tools []mcp.Tool) []mcp.Tool {
+	out := make([]mcp.Tool, 0, len(tools))
+	for i := range tools {
+		name := tools[i].Name
+		if !featuresEnabled(r.server.Features, name) {
+			continue
+		}
+		if _, isScript := r.scriptTools[name]; isScript && !r.server.Features.ScriptsEnabled() {
+			continue
+		}
+		out = append(out, tools[i])
+	}
+	return out
+}
+
 // Tools returns the merged tool list served by tools/list (management tools
 // first, then each API's tools sorted by API name).
 func (r *Registry) Tools() []mcp.Tool {
@@ -1356,6 +1375,7 @@ func (r *Registry) Tools() []mcp.Tool {
 	defer r.mu.RUnlock()
 	out := make([]mcp.Tool, len(r.tools))
 	copy(out, r.tools)
+	out = r.gatedToolsLocked(out)
 	return out
 }
 
@@ -1391,7 +1411,7 @@ func (r *Registry) ToolsForSession(connID string) []mcp.Tool {
 	if !hasOverride {
 		out := make([]mcp.Tool, len(r.tools))
 		copy(out, r.tools)
-		return out
+		return r.gatedToolsLocked(out)
 	}
 	names := make([]string, 0, len(r.apis))
 	for name := range r.apis {
@@ -1413,7 +1433,7 @@ func (r *Registry) ToolsForSession(connID string) []mcp.Tool {
 		}
 	}
 	tools = r.appendScriptsLocked(tools, connID)
-	return tools
+	return r.gatedToolsLocked(tools)
 }
 
 // IsToolExposedForSession reports whether a fully qualified operation tool is

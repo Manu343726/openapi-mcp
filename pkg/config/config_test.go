@@ -1,12 +1,14 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestConfig_GetAPIKey(t *testing.T) {
@@ -289,3 +291,148 @@ func TestUIServerConfigDefaults(t *testing.T) {
 	t.Setenv("UI_DEFAULTS_TEST_TOKEN", "abc")
 	assert.Equal(t, "abc", u2.ResolveToken())
 }
+
+func TestFeaturesConfigDefaults(t *testing.T) {
+	// Every production feature is on by default; only the beta web UI is off.
+	var f FeaturesConfig
+	assert.False(t, f.WebUIEnabled(), "web UI is beta -> disabled by default")
+	assert.True(t, f.KnowledgeEnabled())
+	assert.True(t, f.MetaEnabled())
+	assert.True(t, f.ScriptsEnabled())
+	assert.True(t, f.APIRegistrationEnabled())
+	assert.True(t, f.APIIntrospectionEnabled())
+	assert.True(t, f.APIExposureEnabled())
+
+	var sc ServerConfig
+	assert.False(t, sc.WebUIEnabled(), "ServeMCP must not mount the UI by default")
+}
+
+func TestFeaturesConfigOverrides(t *testing.T) {
+	off, on := false, true
+	f := FeaturesConfig{
+		WebUI:           &off,
+		Knowledge:       &off,
+		Meta:            &off,
+		Scripts:         &off,
+		APIRegistration: &off,
+		APIIntrospection: &off,
+		APIExposure:     &off,
+	}
+	assert.False(t, f.WebUIEnabled())
+	assert.False(t, f.KnowledgeEnabled())
+	assert.False(t, f.MetaEnabled())
+	assert.False(t, f.ScriptsEnabled())
+	assert.False(t, f.APIRegistrationEnabled())
+	assert.False(t, f.APIIntrospectionEnabled())
+	assert.False(t, f.APIExposureEnabled())
+
+	f2 := FeaturesConfig{WebUI: &on}
+	assert.True(t, f2.WebUIEnabled())
+	assert.True(t, f2.KnowledgeEnabled(), "unset flags keep their default")
+}
+
+func TestFeaturesMasterSwitchEnablesBetaWebUI(t *testing.T) {
+	on := true
+	f := FeaturesConfig{Enabled: &on}
+	assert.True(t, f.WebUIEnabled(), "experimental master switch turns the beta web UI on")
+	assert.True(t, ServerConfig{Features: f}.WebUIEnabled())
+
+	// An explicit web_ui: false beats the master switch.
+	off := false
+	f2 := FeaturesConfig{Enabled: &on, WebUI: &off}
+	assert.False(t, f2.WebUIEnabled())
+}
+
+func TestServerConfigWebUIEnabledLegacyCompat(t *testing.T) {
+	on, off := true, false
+
+	// Legacy explicit ui.enabled: true keeps the UI on without feature flags.
+	sc := ServerConfig{UI: UIServerConfig{Enabled: &on}}
+	assert.True(t, sc.WebUIEnabled())
+
+	// Legacy ui.enabled: false forces it off even when the master switch is on.
+	sc2 := ServerConfig{UI: UIServerConfig{Enabled: &off}, Features: FeaturesConfig{Enabled: &on}}
+	assert.False(t, sc2.WebUIEnabled())
+
+	// Master switch + no legacy field -> on.
+	sc3 := ServerConfig{Features: FeaturesConfig{Enabled: &on}}
+	assert.True(t, sc3.WebUIEnabled())
+}
+
+func TestFeaturesConfigRoundTrip(t *testing.T) {
+	off := false
+	want := FeaturesConfig{
+		Enabled:         &off,
+		WebUI:           &off,
+		APIRegistration: &off,
+		APIIntrospection: &off,
+		APIExposure:     &off,
+		Knowledge:       &off,
+		Meta:            &off,
+		Scripts:         &off,
+	}
+
+	yb, err := yaml.Marshal(want)
+	require.NoError(t, err)
+	var got FeaturesConfig
+	require.NoError(t, yaml.Unmarshal(yb, &got))
+	assert.Equal(t, want, got)
+	assert.False(t, got.WebUIEnabled())
+
+	jb, err := json.Marshal(want)
+	require.NoError(t, err)
+	var gotJ FeaturesConfig
+	require.NoError(t, json.Unmarshal(jb, &gotJ))
+	assert.Equal(t, want, gotJ)
+
+	// An empty config round-trips as all-defaults.
+	var empty FeaturesConfig
+	yb, err = yaml.Marshal(empty)
+	require.NoError(t, err)
+	require.NotEmpty(t, yb)
+	assert.NoError(t, yaml.Unmarshal(yb, &empty))
+	assert.False(t, empty.WebUIEnabled())
+	assert.True(t, empty.KnowledgeEnabled())
+}
+
+func TestServerConfigFeaturesRoundTripYAML(t *testing.T) {
+	const doc = `
+server:
+  port: 9000
+  features:
+    web_ui: true
+    knowledge: false
+`
+	var fc FileConfig
+	require.NoError(t, yaml.Unmarshal([]byte(doc), &fc))
+	assert.True(t, fc.Server.WebUIEnabled(), "web_ui:true -> UI served")
+	assert.False(t, fc.Server.Features.KnowledgeEnabled())
+
+	// A legacy explicit ui.enabled: false still forces the UI off.
+	const doc2 = `
+server:
+  ui:
+    enabled: false
+  features:
+    web_ui: true
+`
+	var fc2 FileConfig
+	require.NoError(t, yaml.Unmarshal([]byte(doc2), &fc2))
+	assert.False(t, fc2.Server.WebUIEnabled(), "legacy ui.enabled:false beats web_ui:true")
+
+	sc := ServerConfig{
+		Port: 9000,
+		Features: FeaturesConfig{
+			Enabled:   boolPtrForTest(true),
+			Knowledge: boolPtrForTest(true),
+		},
+	}
+	yb, err := yaml.Marshal(sc)
+	require.NoError(t, err)
+	var back ServerConfig
+	require.NoError(t, yaml.Unmarshal(yb, &back))
+	assert.True(t, back.WebUIEnabled())
+	assert.True(t, back.Features.KnowledgeEnabled())
+}
+
+func boolPtrForTest(v bool) *bool { return &v }

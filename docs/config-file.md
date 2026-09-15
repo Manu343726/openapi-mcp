@@ -27,6 +27,56 @@ apis:
         base_url: https://staging.weatherbit.io/v2.0
 ```
 
+## Server object
+
+Optional top-level `server` block configures the MCP process itself:
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `port` | int | `--port` flag | Port the MCP HTTP server listens on. Overrides the `--port` flag. |
+| `log_level` | string | `--log-level` flag | Minimum log level (`debug`, `info`, `warn`, `error`). |
+| `ui.enabled` | bool | off (beta) | Legacy switch for the web UI shell. An explicit `true` still serves it (backward compatible); an explicit `false` forces it off even when `features.web_ui` is on. |
+| `features` | object | see below | Feature flags (see `features` object). |
+
+### `features` object
+
+Every feature is on by default **except the beta web UI** (`web_ui`), which is
+off until explicitly enabled.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | false | Master switch for the beta feature set (the web UI). Individual flags override it. |
+| `web_ui` | bool | false (beta) | Serve the browser web UI at `/ui` (static shell, manifest, chat, events, CopilotKit runtime). |
+| `api_registration` | bool | true | API/target registration & reload tools: `register_openapi_api`, `unregister_openapi_api`, `list_openapi_apis`, `reload_api`, `check_api_spec`, and the target-management tools. |
+| `api_introspection` | bool | true | API documentation & introspection tools: `describe_openapi_api`, `get_api_operation`, `list_api_schemas`, `search_openapi_operations`, `export_openapi_config`. |
+| `api_exposure` | bool | true | Runtime tool-footprint tools: `update_api_exposure`, `update_session_api_exposure`, `clear_session_api_exposure`, `api_exposure`. |
+| `knowledge` | bool | true | Knowledge library tools: `knowledge_*`, `capabilities`, `discover_task`, `run_task`, `view`. |
+| `meta` | bool | true | Meta knowledge base tools: `meta_init`, `meta_status`, `meta_sync`, `meta_update_knowledge`. |
+| `scripts` | bool | true | Scripting tools (`script_list`, `script_describe`, `knowledge_promote_script`) and per-API script tools. |
+
+Disabling a feature removes its tools from `tools/list` (shrinking the prompt
+surface an AI harness downloads at discovery/startup) and rejects direct calls
+to them with a clear "feature disabled" error instead of "unknown tool". A small
+set of core management tools (`relogin`, `test_api_target`, `reload_config`,
+`set_log_level`, `preview_api_call`) is always exposed.
+
+Example — keep everything but drop the knowledge layer:
+
+```yaml
+server:
+  features:
+    knowledge: false
+```
+
+Example — turn the beta web UI on:
+
+```yaml
+server:
+  features:
+    web_ui: true
+    # ...or features.enabled: true to enable the whole beta set.
+```
+
 ## API object
 
 | Field | Type | Description |

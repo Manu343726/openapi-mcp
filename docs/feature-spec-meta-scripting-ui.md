@@ -1337,6 +1337,19 @@ next to a Library tab that launches dashboards/views onto the board
 `webui/src/components/`). Bundle in git-ignored `webui/dist/`, embedded via
 `go:embed`; `make build` runs `make webui` first.
 
+**Latest landed (this session — production hardening, not a phase):** feature
+flags in `pkg/config` (`server.features`): only the **web UI is beta and off by
+default**; knowledge/meta/scripts/api-registration/api-introspection/api-exposure
+all have flags and default **on**. Each flag gates both the `tools/list` surface
+and direct `tools/call` dispatch (`pkg/server/features.go`,
+`gatedToolsLocked`, `runManagementTool`); the legacy `server.ui.enabled: true`
+still forces the UI on. Tool surface and serialized discovery-payload budgets are
+pinned in tests (`pkg/server/features_test.go`), a real streamable-HTTP MCP
+harness covers the machine handshake + JSON-RPC error surface
+(`pkg/server/mcp_harness_test.go`), and `tools/call` now rejects a missing tool
+name with `-32602` instead of a confusing failure. Docs: `config-file.md`
+(`server.features` reference) and `development.md`.
+
 **Canonical model (validated with the product owner):** three composed concepts
 live as knowledge documents and drive everything:
 

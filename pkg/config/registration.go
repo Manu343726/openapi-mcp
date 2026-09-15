@@ -515,14 +515,122 @@ type ServerConfig struct {
 
 	// UI configures the browser-facing web UI shell served alongside /mcp.
 	UI UIServerConfig `json:"ui,omitempty" yaml:"ui,omitempty"`
+
+	// Features gates the feature set behind opt-in/opt-out flags. Every feature
+	// is on by default EXCEPT the web UI, which is beta and therefore off until
+	// explicitly enabled (via web_ui or the experimental master switch).
+	Features FeaturesConfig `json:"features,omitempty" yaml:"features,omitempty"`
+}
+
+// FeaturesConfig holds the feature flags. Each pointer is optional: an absent
+// flag means "default", which is true for every production feature and false
+// for the beta web UI. The experimental mask turns the beta feature set on
+// (and can be used to keep everything off wholesale).
+type FeaturesConfig struct {
+	// Enabled is the master switch for the beta feature set (the web UI).
+	// Absent = false. Individual flags take precedence over it.
+	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+
+	// WebUI is the beta web UI shell (/ui and its bridge, the view stream and
+	// the CopilotKit runtime). Beta: absent means disabled.
+	WebUI *bool `json:"web_ui,omitempty" yaml:"web_ui,omitempty"`
+
+	// APIRegistration gates registering/unregistering/reloading APIs and
+	// managing their targets through the MCP tools. Default enabled.
+	APIRegistration *bool `json:"api_registration,omitempty" yaml:"api_registration,omitempty"`
+
+	// APIIntrospection gates the API documentation / introspection tools
+	// (describe_openapi_api, get_api_operation, list_api_schemas, ...).
+	// Default enabled.
+	APIIntrospection *bool `json:"api_introspection,omitempty" yaml:"api_introspection,omitempty"`
+
+	// APIExposure gates the runtime tool-footprint tools
+	// (update_api_exposure, update_session_api_exposure, ...). Default enabled.
+	APIExposure *bool `json:"api_exposure,omitempty" yaml:"api_exposure,omitempty"`
+
+	// Knowledge gates the knowledge library tool layer (knowledge_*,
+	// capabilities, discover_task, run_task, view). Default enabled.
+	Knowledge *bool `json:"knowledge,omitempty" yaml:"knowledge,omitempty"`
+
+	// Meta gates the meta knowledge base tools (meta_init, meta_status,
+	// meta_sync, meta_update_knowledge). Default enabled.
+	Meta *bool `json:"meta,omitempty" yaml:"meta,omitempty"`
+
+	// Scripts gates the scripting tools (script_list, script_describe,
+	// knowledge_promote_script) and the per-API script tools. Default enabled.
+	Scripts *bool `json:"scripts,omitempty" yaml:"scripts,omitempty"`
+}
+
+// WebUIEnabled reports whether the beta web UI is served. A legacy explicit
+// ui.enabled acts as a hard override in both directions (kept for backward
+// compatibility); otherwise the features flags decide, with the beta default
+// being disabled.
+func (s ServerConfig) WebUIEnabled() bool {
+	if s.UI.Enabled != nil {
+		return *s.UI.Enabled
+	}
+	return s.Features.WebUIEnabled()
+}
+
+// WebUIEnabled reports whether the beta web UI is enabled (default false).
+func (f FeaturesConfig) WebUIEnabled() bool {
+	if f.WebUI != nil {
+		return *f.WebUI
+	}
+	return f.Enabled != nil && *f.Enabled
+}
+
+// KnowledgeEnabled reports whether the knowledge tool layer is exposed
+// (default true).
+func (f FeaturesConfig) KnowledgeEnabled() bool {
+	return truthy(f.Knowledge, true)
+}
+
+// MetaEnabled reports whether the meta knowledge base tools are exposed
+// (default true).
+func (f FeaturesConfig) MetaEnabled() bool {
+	return truthy(f.Meta, true)
+}
+
+// ScriptsEnabled reports whether the scripting tools are exposed (default true).
+func (f FeaturesConfig) ScriptsEnabled() bool {
+	return truthy(f.Scripts, true)
+}
+
+// APIRegistrationEnabled reports whether API/target registration tools are
+// exposed (default true).
+func (f FeaturesConfig) APIRegistrationEnabled() bool {
+	return truthy(f.APIRegistration, true)
+}
+
+// APIIntrospectionEnabled reports whether the introspection/documentation tools
+// are exposed (default true).
+func (f FeaturesConfig) APIIntrospectionEnabled() bool {
+	return truthy(f.APIIntrospection, true)
+}
+
+// APIExposureEnabled reports whether the runtime exposure tools are exposed
+// (default true).
+func (f FeaturesConfig) APIExposureEnabled() bool {
+	return truthy(f.APIExposure, true)
+}
+
+// truthy returns b when set, otherwise dflt.
+func truthy(b *bool, dflt bool) bool {
+	if b != nil {
+		return *b
+	}
+	return dflt
 }
 
 // UIServerConfig configures the interactive web UI shell (/ui, /ui/manifest,
 // /ui/chat, /ui/events). The Go server serves a pre-built static bundle and a
 // JSON bridge into the live registry; each browser tab is its own MCP session.
 type UIServerConfig struct {
-	// Enabled turns the UI endpoints on/off. Absent means enabled (the UI is on
-	// by default); set enabled: false to switch it off.
+	// Enabled turns the UI endpoints on/off. The UI is a beta feature disabled
+	// by default; an explicit enabled: true here is honored for backward
+	// compatibility (equivalent to server.features.web_ui: true), and
+	// enabled: false forces it off regardless of the feature flags.
 	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
 	// SessionHeader is the request header carrying the opaque per-tab session
 	// token (default "X-Ui-Session"); the "?session=" query parameter is also
