@@ -39,29 +39,31 @@ export function ViewRender({ view }: { view: ViewPayload }) {
     <div className={`view view-${layout}${view.error ? " view-error" : ""}`}>
       <div className="view-title">{title}</div>
       {layout === "table" && columns.length > 0 ? (
-        <table className="view-table">
-          <thead>
-            <tr>
-              {columns.map((c) => (
-                <th key={c}>{c}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row, i) => (
-              <tr key={i}>
+        <div className="view-table-scroll">
+          <table className="view-table">
+            <thead>
+              <tr>
                 {columns.map((c) => (
-                  <td key={c}>{pretty(row[c])}</td>
+                  <th key={c}>{c}</th>
                 ))}
               </tr>
-            ))}
-            {rows.length === 0 && (
-              <tr>
-                <td colSpan={columns.length}>no rows</td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {rows.map((row, i) => (
+                <tr key={i}>
+                  {columns.map((c) => (
+                    <td key={c}>{pretty(row[c])}</td>
+                  ))}
+                </tr>
+              ))}
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={columns.length}>no rows</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       ) : layout === "rows" ? (
         <div className="view-cards">
           {rows.map((row, i) => (

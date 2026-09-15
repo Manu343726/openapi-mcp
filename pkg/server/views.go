@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"strings"
+	"sync"
 
 	"github.com/ckanthony/openapi-mcp/pkg/logx"
 )
@@ -52,6 +53,7 @@ func (r *Registry) viewParams(toolName string, payload ToolResultPayload) map[st
 			if count, ok := render["count"]; ok {
 				params["count"] = count
 			}
+			params["result"] = isResultPayload(params)
 			return params
 		}
 	}
@@ -66,18 +68,21 @@ func (r *Registry) viewParams(toolName string, payload ToolResultPayload) map[st
 			params["columns"] = cols
 			params["rows"] = rows
 			params["count"] = len(rows)
+			params["result"] = isResultPayload(params)
 			return params
 		}
 		params["layout"] = "markdown"
 	case strings.HasPrefix(trimmed, "{"):
 		if isJSONObject(text) {
 			params["layout"] = "list"
+			params["result"] = isResultPayload(params)
 			return params
 		}
 		params["layout"] = "markdown"
 	default:
 		params["layout"] = "markdown"
 	}
+	params["result"] = isResultPayload(params)
 	return params
 }
 
@@ -99,35 +104,148 @@ func (r *Registry) toolKind(toolName string) string {
 }
 
 // emitToolResultView pushes the structured view for a completed call onto the
-// session stream. connID == "" (stateless client) is a no-op.
-func (r *Registry) emitToolResultView(connID, toolName string, payload ToolResultPayload) {
+// session stream. connID == "" (stateless client) is a no-op. args, when
+// non-nil, is carried in the payload so a web observer can re-run the same call
+// on the shared session to refresh the card.
+func (r *Registry) emitToolResultView(connID, toolName string, payload ToolResultPayload, args map[string]interface{}) {
 	if connID == "" {
 		return
 	}
-	enqueueView(connID, r.viewParams(toolName, payload))
+	params := r.viewParams(toolName, payload)
+	if len(args) > 0 {
+		params["args"] = args
+	}
+	enqueueView(connID, params)
 }
 
 // enqueueView sends a notifications/view notification to one session's stream.
 // Delivery is best-effort (dropped when the channel is full), like other
-// broadcasts.
+// broadcasts. The payload is recorded in the session's ephemeral history so a
+// web tab that (re)joins the session can re-render it, and it is fanned out to
+// every web observer of the session as well as the owner channel — so whoever
+// triggered the change (agent or web UI), the other side stays in sync.
 func enqueueView(connID string, params map[string]interface{}) {
-	connMutex.RLock()
-	ch, ok := activeConnections[connID]
-	connMutex.RUnlock()
-	if !ok {
-		viewLog.Debug("no session stream for view event", "conn_id", connID)
-		return
-	}
 	notification := jsonRPCResponse{
 		Jsonrpc: "2.0",
 		Method:  "notifications/view",
 		Params:  params,
 	}
-	select {
-	case ch <- notification:
-	default:
-		viewLog.Warn("dropped view event (channel full)", "conn_id", connID)
+	recordViewHistory(connID, params)
+
+	connMutex.RLock()
+	ch, hasOwner := activeConnections[connID]
+	connMutex.RUnlock()
+	if hasOwner {
+		select {
+		case ch <- notification:
+		default:
+			viewLog.Warn("dropped view event (channel full)", "conn_id", connID)
+		}
 	}
+
+	connMutex.RLock()
+	obs := sessionObservers[connID]
+	var keys []chan jsonRPCResponse
+	for och := range obs {
+		keys = append(keys, och)
+	}
+	connMutex.RUnlock()
+	for _, och := range keys {
+		select {
+		case och <- notification:
+		default:
+			viewLog.Warn("dropped view event (observer channel full)", "conn_id", connID)
+		}
+	}
+}
+
+// maxViewHistory bounds the per-session replay cache (one session, ephemeral).
+const maxViewHistory = 50
+
+// viewHistory keeps a small, per-session, in-memory replay buffer so a web tab
+// that opens /ui?sessionId=<session> straight away renders the results the
+// agent already produced. It is never persisted and dies with the session.
+var viewHistory = struct {
+	sync.RWMutex
+	bySession map[string][]map[string]interface{}
+}{bySession: map[string][]map[string]interface{}{}}
+
+func recordViewHistory(connID string, params map[string]interface{}) {
+	if connID == "" {
+		return
+	}
+	viewHistory.Lock()
+	arr := viewHistory.bySession[connID]
+	arr = append(arr, params)
+	if len(arr) > maxViewHistory {
+		arr = arr[len(arr)-maxViewHistory:]
+	}
+	viewHistory.bySession[connID] = arr
+	viewHistory.Unlock()
+}
+
+// historyForSession returns a copy of the session's replay buffer. The returned
+// payloads are shallow copies annotated with stale=true: they are a cached
+// snapshot, so the UI must flag them as refreshable rather than present them as
+// live.
+func historyForSession(connID string) []map[string]interface{} {
+	viewHistory.RLock()
+	arr := viewHistory.bySession[connID]
+	out := make([]map[string]interface{}, len(arr))
+	for i, p := range arr {
+		cp := make(map[string]interface{}, len(p)+1)
+		for k, v := range p {
+			cp[k] = v
+		}
+		cp["stale"] = true
+		out[i] = cp
+	}
+	viewHistory.RUnlock()
+	return out
+}
+
+func clearViewHistory(connID string) {
+	viewHistory.Lock()
+	delete(viewHistory.bySession, connID)
+	viewHistory.Unlock()
+}
+
+// sessionObservers maps a session id to the set of web observer channels that
+// are mirroring its view stream (registered by /ui/events when the tab opened
+// with ?sessionId=<session> or even the base web token of an existing session).
+// Guarded by connMutex, like activeConnections.
+var sessionObservers = make(map[string]map[chan jsonRPCResponse]bool)
+
+func registerViewObserver(connID string, ch chan jsonRPCResponse) {
+	if connID == "" {
+		return
+	}
+	connMutex.Lock()
+	if sessionObservers[connID] == nil {
+		sessionObservers[connID] = map[chan jsonRPCResponse]bool{}
+	}
+	sessionObservers[connID][ch] = true
+	connMutex.Unlock()
+}
+
+func unregisterViewObserver(connID string, ch chan jsonRPCResponse) {
+	if connID == "" {
+		return
+	}
+	connMutex.Lock()
+	if m, ok := sessionObservers[connID]; ok {
+		delete(m, ch)
+		if len(m) == 0 {
+			delete(sessionObservers, connID)
+		}
+	}
+	connMutex.Unlock()
+}
+
+// removeViewObserversLocked detaches every web observer of a session. Caller
+// holds connMutex.Lock.
+func removeViewObserversLocked(connID string) {
+	delete(sessionObservers, connID)
 }
 
 // isJSONObject reports whether text parses to a JSON object.
@@ -138,4 +256,20 @@ func isJSONObject(text string) bool {
 	}
 	_, ok := v.(map[string]interface{})
 	return ok
+}
+
+// isResultPayload classifies a view payload as a result (data gathered by a
+// tool/task call) or a notification (MCP feedback: confirmations, status
+// messages, errors).  The rule is shape-based: structured data layouts
+// (table/list/rows) and explicit view renders are results; plain markdown text
+// and errors are notifications.
+func isResultPayload(params map[string]interface{}) bool {
+	if err, _ := params["error"].(bool); err {
+		return false
+	}
+	if _, ok := params["view"]; ok {
+		return true
+	}
+	layout, _ := params["layout"].(string)
+	return layout == "table" || layout == "list" || layout == "rows"
 }

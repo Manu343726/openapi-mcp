@@ -26,6 +26,7 @@ func TestViewParamsTable(t *testing.T) {
 	assert.ElementsMatch(t, []string{"a", "b"}, params["columns"])
 	rows := params["rows"].([]map[string]interface{})
 	require.Len(t, rows, 2)
+	assert.Equal(t, true, params["result"], "table payload is a result")
 }
 
 func TestViewParamsMarkdownFallback(t *testing.T) {
@@ -34,9 +35,18 @@ func TestViewParamsMarkdownFallback(t *testing.T) {
 	assert.Equal(t, "markdown", params["layout"])
 	assert.Equal(t, "unknown", params["kind"])
 	assert.Equal(t, "not json", params["text"])
+	assert.Equal(t, false, params["result"], "markdown feedback is not a result")
 
 	obj := reg.viewParams("some_tool", payloadOf(`{"k":"v"}`, false))
 	assert.Equal(t, "list", obj["layout"])
+	assert.Equal(t, true, obj["result"], "list layout is a result")
+}
+
+func TestViewParamsErrorIsNotification(t *testing.T) {
+	reg := NewRegistry("")
+	params := reg.viewParams("some_tool", payloadOf("something broke", true))
+	assert.Equal(t, true, params["error"])
+	assert.Equal(t, false, params["result"], "errors are notifications, not results")
 }
 
 func TestViewParamsPassthroughForViewTool(t *testing.T) {
@@ -47,6 +57,7 @@ func TestViewParamsPassthroughForViewTool(t *testing.T) {
 	assert.Equal(t, "table", params["layout"])
 	assert.EqualValues(t, 1, params["count"])
 	assert.NotNil(t, params["view"])
+	assert.Equal(t, true, params["result"], "view renders are results")
 }
 
 func TestEmitToolResultViewDeliversToSession(t *testing.T) {
@@ -62,19 +73,25 @@ func TestEmitToolResultViewDeliversToSession(t *testing.T) {
 		connMutex.Unlock()
 	})
 
-	reg.emitToolResultView(connID, "acme__getCurrent", payloadOf(`[{"a":1}]`, false))
+	reg.emitToolResultView(connID, "acme__getCurrent", payloadOf(`[{"a":1}]`, false), map[string]interface{}{"zone": "A"})
 	select {
 	case msg := <-ch:
 		assert.Equal(t, "notifications/view", msg.Method)
 		p := msg.Params.(map[string]interface{})
 		assert.Equal(t, "acme__getCurrent", p["tool"])
 		assert.Equal(t, "table", p["layout"])
+		assert.Equal(t, true, p["result"], "emitted payload carries result flag")
+		if args, ok := p["args"].(map[string]interface{}); ok {
+			assert.Equal(t, "A", args["zone"])
+		} else {
+			t.Error("tool args not carried in the view payload")
+		}
 	case <-time.After(time.Second):
 		t.Fatal("view event not delivered")
 	}
 
 	// Stateless (connID "") is a no-op.
-	reg.emitToolResultView("", "acme__getCurrent", payloadOf(`[{"a":1}]`, false))
+	reg.emitToolResultView("", "acme__getCurrent", payloadOf(`[{"a":1}]`, false), nil)
 }
 
 func TestUIViewEventForScriptResult(t *testing.T) {

@@ -37,3 +37,7 @@ __debug_bin*
 
 # Playwright MCP test artifacts
 .playwright-mcp/
+
+# Ad-hoc build/screenshot artifacts created while verifying the session
+openapi-mcp
+board-*.png

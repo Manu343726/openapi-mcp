@@ -895,6 +895,22 @@ explicit requirements:
   - `inputs` — interactive controls bound to the source's parameters,
   - `layout` — table/list/cards/chart,
   - `auto_show` — display automatically when `source` completes.
+- **Three composed terms.** *widget* is a UI component associated with a task,
+  tool or API operation (the building block, code-registered in the web app and
+  also documented as `kind: widget`); *view* is one or more widgets exposing a
+  task/tool/op (`kind: view` doc, `source` + `inputs` + `layout`); *dashboard*
+  is a set of views (`kind: dashboard` doc that **references view docs** with
+  per-slot layout/input overrides). The whole UI and knowledge are thus
+  composable and reusable across sessions.
+- **Definitions are shared; data is not.** Widget/view/dashboard *definitions*
+  live in the knowledge base and are shared across sessions. A session's *data*
+  and board state are ephemeral: a per-session in-memory presentation cache
+  serves fast rendering and session rejoining, cached snapshots are marked
+  **stale/refreshable** in the UI, and nothing leaks between sessions.
+  Refreshing data = a direct tool re-run on the shared session + broadcast.
+- **Two-way sync.** Any change to presentation layout or presented data is
+  notified to both the AI agent and the web API (whichever did not trigger it)
+  through the shared session view stream, so everyone stays in sync.
 - **Dashboards bind to tasks.** A dashboard may be associated with a capability
   (task) — either declared in the doc (`source`/`related` to the capability) or
   set at runtime. When that task finishes (`run_task` returns), the server emits
@@ -1082,6 +1098,24 @@ Tracked against §6. Each item links the working changes that shipped it.
   (lazy-loaded like `apiEntryFor`) plus the `_meta` base. Live-verified: chat
   runs and Library launches both produce result cards on the board while the
   chat timeline stays secondary.
+- **Session-bound reflection layer (session identity + two-way sync)**:
+  Every agent session is first-class and can be mirrored by a web tab.
+  **Stable session ids** — streamable-HTTP `initialize` returns a session id
+  (`_meta.sessionId`, `Mcp-Session-Id` response header) that the client echoes;
+  SSE GET reuses an existing session; POSTs carrying `Mcp-Session-Id` are
+  answered synchronously (legacy SSE POSTs keep 202-then-SSE). **View
+  fan-out** — `enqueueView` (`pkg/server/views.go`) delivers `notifications/view`
+  to the owner channel *and* every registered web observer, plus an ephemeral
+  per-session replay cache (`viewHistory`, 50 max, stale-flagged on replay).
+  **Observer binding** — `/ui?sessionId=<id>` binds the tab to that MCP session
+  (`UIBridge` `owner` observer split; `DropSession` never tears a shared
+  session, `/ui/events` replays history then streams live, `/ui/chat` drives
+  the shared registry session, `/ui/sessions` lists active sessions). Agent and
+  web API therefore stay in sync regardless of who triggered the change.
+  Replayed cards carry a **cached data** badge and a **refresh** action: it
+  re-runs the backing call on the shared session (tool args ride in the emitted
+  view payload) and the fresh card arrives via the session stream.
+  Tests: `pkg/server/session_bind_test.go`.
 - **Phase 1 — Meta KB** (commits `985ed9c`, part of `417653a`): `_meta`
   virtual entry, `meta_init` / `meta_status` / `meta_sync`, `kind: view`/
   `kind: dashboard` model kinds in `pkg/knowledge` (`model.go`, `links.go`,
@@ -1296,45 +1330,78 @@ Tracked against §6. Each item links the working changes that shipped it.
 (scripting hardening), 5 (web UI shell) and the Phase 7 model + dashboard/view
 work (result→view wrapper, `notifications/view` stream) are implemented and
 committed to `main`; **Phase 6 (Generative UI) is implemented and live-verified.**
-Newest addition: the UI was rebuilt **result-centric** — the Workbench board is
-the primary surface, and the copilot chat is demoted to an "Ask AI" tab of the
-side Dock next to a Library tab that launches dashboards/views onto the board
+The UI was rebuilt **result-centric** — the Workbench board is the primary
+surface, and the copilot chat is demoted to an "Ask AI" tab of the side Dock
+next to a Library tab that launches dashboards/views onto the board
 (`Registry.uiViewEntries` → `/ui/manifest` `views`; Board/Dock/Library in
 `webui/src/components/`). Bundle in git-ignored `webui/dist/`, embedded via
 `go:embed`; `make build` runs `make webui` first.
 
+**Canonical model (validated with the product owner):** three composed concepts
+live as knowledge documents and drive everything:
+
+- **widget** — a UI component (renderer) associated to a task/tool/API op; the
+  building block of views. Code-registered in the web app and *also* documented
+  as `kind: widget` KB docs, exposed through `/ui/manifest` `widgets`.
+- **view** — one or more widgets exposing a task/tool/API op; a `kind: view`
+  doc with `source` + `inputs[]` + `layout` (+ optional `auto_show`).
+- **dashboard** — a set of views; a `kind: dashboard` doc that **references
+  view docs** (by api+path/id) with optional per-slot layout/width and input
+  overrides, so dashboards are composable and reusable across sessions.
+
+Design rules confirmed: **data is never stored** — a dashboard/view *definition*
+lives in the KB (shared across sessions), but a session's *data and board state*
+are ephemeral (a per-session in-memory presentation cache only, for fast render
+and session rejoining) and never leak between sessions. The UI must mark cached
+data as **stale/refreshable**. **Refreshing = a direct tool re-run on the shared
+session + broadcast** (the agent observes; it does not choreograph every run).
+Every presentation/data change is notified to **both** the AI agent and the web
+API (whichever did not trigger it) via the shared session view stream.
+
+**Session binding (landed):** each agent session is now first-class. Streamable
+HTTP `initialize` returns a session id (`_meta.sessionId` + `Mcp-Session-Id`
+header) that the client echoes back; SSE GET reuses it; every
+`tools/call` outcome is mirrored onto the session stream
+(`maybeEmitStreamableView`). A user opens the agent's session UI at
+`/ui?sessionId=<id>` — the tab binds to that MCP session as an **observer**
+(`UIBridge` `owner`/observer split), `/ui/events` replays the session's
+ephemeral history (stale-marked) and then streams it live, and `/ui/chat`
+drives the same shared registry session. `enqueueView` fans out to the owner
+channel and all observers; `/ui/sessions` lists active sessions.
+
 **Remaining (in order):**
 
-1. **Board-native dashboard rendering + interactive inputs.** `ViewRender.tsx`
-   renders `table`/`rows`/`markdown`; add `layout: cards`/`layout: chart`
-   variants and, on `view` cards, input controls (from the payload's `inputs`
-   list) that re-issue the backing call with filled values onto the board.
-2. **Surfacing `run_task` auto-shows and planner dashboard routing.**
-   `run_task` auto mode already appends an `--- auto-displayed views ---` block
-   and the `view` tool emits render payloads; route dashboard/view requests in
-   the GenUI planner (`planRun`, `pkg/server/genui.go`) to the `view` tool and
-   turn every auto-shown dashboard into a board card.
-3. **AG-UI `CUSTOM "view"` cards in the chat timeline.** The runtime already
-   emits `NewCustomEvent("view", WithValue(view))` per tool call
-   (`pkg/server/genui.go` `streamGenUIToolCall`). The client keeps
-   `useRenderCustomMessages()` wiring inert because the message shape for a
-   CUSTOM event in the shipped `@ag-ui/core`/headless bundle was never pinned
-   (search `node_modules/@copilotkit/react-core/dist/*.d.mts` and
-   `node_modules/@ag-ui/core/dist/index.d.mts`, the runtime-client-gql
-   `message-conversion/`). Implement `renderCustomMessages` to handle
-   `type === "CUSTOM"` messages and render the same `ViewRender` component the
-   board uses — then the chat shows rich cards inline instead of the
-   `useComponent` placeholder.
-4. **Chart layouts for dashboard views.** `viewParams` (`pkg/server/views.go`)
-   only produces `table`/`list`/`markdown`; add a `chart` projection (e.g. from
-   `{x, y, series}` rows) and render it in `ViewRender`.
-5. **Planner enrichment + build hygiene (optional).** `toolScore`
-   (`pkg/server/genui.go`) is pure keyword overlap; consider entity extraction
-   into `args` (e.g. `zone: "A"`) so single tool calls carry context, and
-   make the planner's resolution order/data explicit in the agent `info` payload.
-   Vite emits chunk-size warnings — code-split off
-   `@copilotkit/react-ui` / highlight.js / markdown-heavy deps
-   (`webui/vite.config.ts`).
+1. **`get_session_ui_url` management tool (NOT implemented).** The agent needs
+   a no-arg management tool that returns the *calling* session's UI URL —
+   `{sessionId, path: "/ui?sessionId=<id>", url: "<resolved base>"}` — so it can
+   hand the user the live board URL. Today the URL only lives in the
+   `initialize` `_meta.session_ui` (relative) and `/ui/sessions` (browse-only);
+   neither is callable mid-session. Implement it in `pkg/server/management.go`
+   (`runManagementTool`, `buildManagementTools` + a const in the tool-name
+   block), resolving the absolute base from `ServerConfig.Port` (and an optional
+   future public-URL setting) and guessing `http://localhost:<port>` otherwise.
+   Add a regression test alongside `session_bind_test.go`.
+2. **Presentation state + widget/knowledge exposure.** Server-authoritative
+   per-session presentation items `{id, kind: widget|view|dashboard, api, doc
+   id, input values, last render, stale}` with a `notifications/presentation`
+   add/remove/reorder/update broadcast; `kind: widget` + dashboard
+   `views:`-references in `pkg/knowledge/model.go`; `view`/`dashboard` tools to
+   instantiate them; `/ui/manifest` gains `widgets` and the board's active items.
+2. **Board-native rendering + interactive refresh.** View-level refresh is
+   live (stale cards re-run the backing call on the shared session; `args`
+   ride the emitted payload). `ViewRender.tsx` still needs `cards`/`chart`
+   layouts, and view/dashboard cards should render their declared `inputs` as
+   live controls (changing an input re-runs the backing call on the shared
+   session and the card is re-rendered fresh).
+3. **Web chat joining the shared session.** The "Ask AI" tab already drives
+   `/ui/chat` with the bound session id; AG-UI `CUSTOM "view"` cards in the chat
+   timeline (resolve the message shape in the shipped `@ag-ui/core` bundle) so
+   chat runs render the same `ViewRender` cards inline.
+4. **Planner routing + auto-show.** Route dashboard/view requests in `planRun`
+   to the `view`/`dashboard` tools; surface `run_task` `auto_show` blocks as
+   board cards.
+5. **Planner enrichment + build hygiene (optional).** Entity extraction into
+   `args` (e.g. `zone: "A"`); code-split the >500 kB Vite chunks.
 
 **Working notes (Phase 3–5 were developed here):**
 
@@ -1352,6 +1419,15 @@ side Dock next to a Library tab that launches dashboards/views onto the board
   so session-scoped tools (exposure, targets, overlay) and broadcasts work
   unchanged. `/ui/chat` calls `Registry.CallTool`; `/ui/events` streams that
   session's channel.
+- A streamable-HTTP agent session is stable: `initialize` mints a session id
+  returned via `_meta.sessionId` and the `Mcp-Session-Id` header; the client
+  echoes it (header or SSE GET) and the server resolves it to the same session
+  channel (`server.go` `handleStreamableRequest` / `httpMethodGetHandler`).
+  POSTs carrying `Mcp-Session-Id` are answered synchronously; legacy SSE POSTs
+  (`X-Connection-ID`/`?sessionId=`) keep the 202-then-SSE flow. View fan-out,
+  the ephemeral per-session replay cache (`viewHistory`, stale-flagged) and the
+  web observer set (`sessionObservers`) live in `pkg/server/views.go`; bind a
+  tab with `/ui?sessionId=<id>` (`ui.go` `sessionFor` observer branch).
 - Always resolve tool names through `toolFullName`/the registry maps
   (`ResolveTool`/`scriptToolFor`/`IsToolExposedForSession`) — capped/truncated
   names must never be re-derived by string surgery.

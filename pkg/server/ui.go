@@ -29,6 +29,7 @@ import (
 type uiSession struct {
 	token     string
 	connID    string
+	owner     bool // true: the tab created the connID; false: it mirrors an existing MCP session
 	createdAt time.Time
 	ch        chan jsonRPCResponse // broadcast notifications for /ui/events
 }
@@ -53,6 +54,7 @@ func (b *UIBridge) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/ui/manifest", b.handleManifest)
 	mux.HandleFunc("/ui/chat", b.handleChat)
 	mux.HandleFunc("/ui/events", b.handleEvents)
+	mux.HandleFunc("/ui/sessions", b.handleSessions)
 	b.registerGenUIRoutes(mux)
 	if sub, err := fs.Sub(webui.Dist, "dist"); err == nil {
 		mux.Handle("/ui/", http.StripPrefix("/ui/", http.FileServer(http.FS(sub))))
@@ -164,6 +166,18 @@ func (b *UIBridge) handleEvents(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 
 	defer b.DropSession(sess.token)
+
+	// Replay this session's ephemeral history so a tab that joins after the
+	// work happened (or re-joins) still sees the board. The payloads carry
+	// stale=true: they are a cached snapshot that may be refreshed.
+	for _, params := range historyForSession(sess.connID) {
+		ev := jsonRPCResponse{Jsonrpc: "2.0", Method: "notifications/view", Params: params}
+		if err := writeSSEEvent(w, "message", ev); err != nil {
+			return
+		}
+		flusher.Flush()
+	}
+
 	for {
 		select {
 		case <-r.Context().Done():
@@ -180,9 +194,66 @@ func (b *UIBridge) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// DropSession closes a browser session: it removes the connection's broadcast
-// channel and calls Registry.DropSession so only this session's overlay,
-// targets, exposure and traces are freed. It is idempotent.
+// handleSessions lists the active server sessions: live MCP/agent connections
+// (which a web tab can bind to via /ui?sessionId=<id>) and web sessions. It is
+// an aid for discovery and debugging; agents normally get their own session's
+// URL straight from the initialize result.
+func (b *UIBridge) handleSessions(w http.ResponseWriter, r *http.Request) {
+	if !b.authorize(w, r) {
+		return
+	}
+	type entry struct {
+		ID          string `json:"id"`
+		Initialized bool   `json:"initialized"`
+		Observers   int    `json:"observers"`
+		Web         bool   `json:"web"`
+	}
+	connMutex.RLock()
+	ids := make([]string, 0, len(activeConnections))
+	for id := range activeConnections {
+		ids = append(ids, id)
+	}
+	initialized := make(map[string]bool, len(initializedConnections))
+	for k, v := range initializedConnections {
+		initialized[k] = v
+	}
+	observerCount := make(map[string]int, len(sessionObservers))
+	for k, v := range sessionObservers {
+		observerCount[k] = len(v)
+	}
+	connMutex.RUnlock()
+	sort.Strings(ids)
+
+	out := make([]entry, 0, len(ids))
+	for _, id := range ids {
+		b.mu.Lock()
+		web := false
+		for _, s := range b.sessions {
+			if s.connID == id && !s.owner {
+				web = true
+				break
+			}
+		}
+		b.mu.Unlock()
+		out = append(out, entry{
+			ID:          id,
+			Initialized: initialized[id],
+			Observers:   observerCount[id],
+			Web:         web,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"count":    len(out),
+		"sessions": out,
+	})
+}
+
+// DropSession closes a browser session. An *owner* session (one that minted its
+// own connID) is torn down completely: overlay, targets, exposure, traces and
+// the broadcast channel are freed. An *observer* session (bound to an MCP
+// session via /ui?sessionId=) only detaches its mirror channel — the underlying
+// agent session is untouched. It is idempotent.
 func (b *UIBridge) DropSession(token string) {
 	b.mu.Lock()
 	sess, ok := b.sessions[token]
@@ -193,11 +264,18 @@ func (b *UIBridge) DropSession(token string) {
 	if !ok {
 		return
 	}
+	if !sess.owner {
+		unregisterViewObserver(sess.connID, sess.ch)
+		close(sess.ch)
+		return
+	}
 	connMutex.Lock()
 	delete(activeConnections, sess.connID)
 	delete(initializedConnections, sess.connID)
+	removeViewObserversLocked(sess.connID)
 	connMutex.Unlock()
 	close(sess.ch)
+	clearViewHistory(sess.connID)
 	b.reg.DropSession(sess.connID)
 }
 
@@ -211,12 +289,21 @@ func (b *UIBridge) SessionCount() int {
 // sessionFor resolves (or creates) the caller's session, enforcing the optional
 // bearer token and the concurrent-session cap. The session token is echoed in
 // the configured header when the caller did not supply one.
+//
+// A token that names an existing MCP session (a connection id, surfaced to the
+// agent as _meta.sessionId and opened as /ui?sessionId=<id>) binds the browser
+// tab to that session as an *observer*: the board mirrors that agent session's
+// view stream and the chat drives the same registry session. Any other token
+// becomes a self-contained web session, exactly as before.
 func (b *UIBridge) sessionFor(w http.ResponseWriter, r *http.Request) (*uiSession, error) {
 	cfg := b.reg.ServerConfig().UI
 	header := cfg.ResolveSessionHeader()
 	token := strings.TrimSpace(r.Header.Get(header))
 	if token == "" {
 		token = strings.TrimSpace(r.URL.Query().Get("session"))
+	}
+	if token == "" {
+		token = strings.TrimSpace(r.URL.Query().Get("sessionId"))
 	}
 	if token == "" {
 		token = uuid.NewString()
@@ -230,9 +317,19 @@ func (b *UIBridge) sessionFor(w http.ResponseWriter, r *http.Request) (*uiSessio
 	if max := cfg.ResolveMaxSessions(); len(b.sessions) >= max {
 		return nil, fmt.Errorf("max concurrent UI sessions (%d) reached", max)
 	}
+	// Observer binding: the token is an existing MCP/agent session.
+	if token != "" && isActiveSession(token) {
+		ch := make(chan jsonRPCResponse, messageChannelBufferSize)
+		registerViewObserver(token, ch)
+		s := &uiSession{token: token, connID: token, createdAt: time.Now(), ch: ch}
+		b.sessions[token] = s
+		serverLog.Info("ui session bound to mcp session", "session", token, "active", len(b.sessions))
+		return s, nil
+	}
 	s := &uiSession{
 		token:     token,
 		connID:    uuid.NewString(),
+		owner:     true,
 		createdAt: time.Now(),
 		ch:        make(chan jsonRPCResponse, messageChannelBufferSize),
 	}
@@ -243,6 +340,15 @@ func (b *UIBridge) sessionFor(w http.ResponseWriter, r *http.Request) (*uiSessio
 	b.sessions[token] = s
 	serverLog.Info("ui session created", "session", token, "conn_id", s.connID, "active", len(b.sessions))
 	return s, nil
+}
+
+// isActiveSession reports whether connID is a live session channel (an MCP
+// client or a self-contained web session).
+func isActiveSession(connID string) bool {
+	connMutex.RLock()
+	defer connMutex.RUnlock()
+	_, ok := activeConnections[connID]
+	return ok
 }
 
 // authorize enforces the optional UI bearer token (server.ui.token_env).

@@ -126,6 +126,14 @@ var connLogLevels = make(map[string]int)
 // Channel buffer size
 const messageChannelBufferSize = 10
 
+// mcpSessionHeader is the MCP streamable-HTTP session header. A session id is
+// issued on initialize (echoed in the initialize result _meta.sessionId and on
+// the Mcp-Session-Id response header) and must be echoed back by the client on
+// every later request, so per-session registry state and the view stream stay
+// attached to one agent conversation even though streamable HTTP is otherwise
+// stateless.
+const mcpSessionHeader = "Mcp-Session-Id"
+
 // --- Server Implementation ---
 
 // ServeMCP starts an HTTP server handling MCP communication for a Registry.
@@ -140,8 +148,8 @@ func ServeMCP(addr string, reg *Registry) error {
 		// CORS Headers (Apply to all relevant requests)
 		w.Header().Set("Access-Control-Allow-Origin", "*") // Be more specific in production
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-Connection-ID")
-		w.Header().Set("Access-Control-Expose-Headers", "X-Connection-ID")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-Connection-ID, Mcp-Session-Id")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Connection-ID, Mcp-Session-Id")
 
 		if r.Method == http.MethodOptions {
 			serverLog.Debug("responding to OPTIONS request")
@@ -173,9 +181,19 @@ func ServeMCP(addr string, reg *Registry) error {
 	return http.ListenAndServe(addr, mux)
 }
 
-// httpMethodGetHandler handles the initial GET request to establish the SSE connection.
+// httpMethodGetHandler handles the initial GET request to establish the SSE
+// stream. When the client already holds a session (streamable HTTP transports
+// send the Mcp-Session-Id header), the stream is attached to that session so
+// server->client notifications (views, tools/list_changed) reach it; otherwise
+// a fresh connection id is minted for the legacy SSE handshake.
 func httpMethodGetHandler(w http.ResponseWriter, r *http.Request, regs ...*Registry) {
-	connectionID := uuid.New().String()
+	connectionID := r.Header.Get(mcpSessionHeader)
+	connMutex.RLock()
+	_, known := activeConnections[connectionID]
+	connMutex.RUnlock()
+	if connectionID == "" || !known {
+		connectionID = uuid.New().String()
+	}
 	serverLog.Info("SSE client connecting", "remote", r.RemoteAddr, "conn_id", connectionID)
 
 	flusher, ok := w.(http.Flusher)
@@ -229,18 +247,25 @@ func httpMethodGetHandler(w http.ResponseWriter, r *http.Request, regs ...*Regis
 	serverLog.Debug("sent mcp-ready event", "remote", r.RemoteAddr, "conn_id", connectionID)
 
 	// --- Setup message channel and store connection ---
-	msgChan := make(chan jsonRPCResponse, messageChannelBufferSize) // Channel for responses
 	connMutex.Lock()
-	activeConnections[connectionID] = msgChan
+	msgChan, exists := activeConnections[connectionID]
+	if !exists {
+		msgChan = make(chan jsonRPCResponse, messageChannelBufferSize) // Channel for responses
+		activeConnections[connectionID] = msgChan
+	}
 	connMutex.Unlock()
-	serverLog.Debug("registered channel for connection", "conn_id", connectionID, "active", len(activeConnections))
+	if !exists {
+		serverLog.Debug("registered channel for connection", "conn_id", connectionID, "active", len(activeConnections))
+	}
 
 	cleanup := func() {
 		connMutex.Lock()
 		delete(activeConnections, connectionID)
 		delete(initializedConnections, connectionID)
 		delete(connLogLevels, connectionID)
+		removeViewObserversLocked(connectionID)
 		connMutex.Unlock()
+		clearViewHistory(connectionID)
 		if len(regs) > 0 && regs[0] != nil {
 			regs[0].DropSession(connectionID)
 		}
@@ -349,13 +374,21 @@ func writeSSEEvent(w http.ResponseWriter, eventName string, data interface{}) er
 //     and answered with a JSON-RPC body (this is what modern clients such as
 //     opencode use).
 func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, reg *Registry) {
-	connID := r.Header.Get("X-Connection-ID") // Try header first
+	// A streamable-HTTP client identifies itself with the Mcp-Session-Id header
+	// (issued at initialize) and always expects a synchronous JSON body back.
+	// Legacy SSE clients POST with X-Connection-ID / ?sessionId= and want their
+	// response queued onto the SSE stream (202).
+	isStreamable := r.Header.Get(mcpSessionHeader) != ""
+	connID := r.Header.Get(mcpSessionHeader)
+	if connID == "" {
+		connID = r.Header.Get("X-Connection-ID") // legacy SSE
+	}
 	if connID == "" {
 		connID = r.URL.Query().Get("sessionId") // Fallback to query parameter
-		serverLog.Debug("X-Connection-ID header missing, checking sessionId query param", "session_id", connID)
+		serverLog.Debug("session header missing, checking sessionId query param", "session_id", connID)
 	}
 
-	if connID == "" {
+	if isStreamable || connID == "" {
 		handleStreamableRequest(w, r, reg)
 		return
 	}
@@ -483,7 +516,7 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, reg *Registry
 		// read the next message optimistically still see the reply first).
 		if tr, ok := respToSend.Result.(ToolResultPayload); ok {
 			if tool := toolNameFromParams(req.Params); tool != "" {
-				reg.emitToolResultView(connID, tool, tr)
+				reg.emitToolResultView(connID, tool, tr, toolArgsFromParams(req.Params))
 			}
 		}
 	default:
@@ -509,6 +542,27 @@ func toolNameFromParams(params interface{}) string {
 		}
 	}
 	return ""
+}
+
+// toolArgsFromParams extracts the "arguments" of a tools/call params value
+// (typed the same way as toolNameFromParams; unknown shapes yield nil).
+func toolArgsFromParams(params interface{}) map[string]interface{} {
+	extract := func(p map[string]interface{}) map[string]interface{} {
+		if a, ok := p["arguments"].(map[string]interface{}); ok {
+			return a
+		}
+		return nil
+	}
+	switch p := params.(type) {
+	case map[string]interface{}:
+		return extract(p)
+	case json.RawMessage:
+		var m map[string]interface{}
+		if json.Unmarshal(p, &m) == nil {
+			return extract(m)
+		}
+	}
+	return nil
 }
 
 // dispatchJSONRPC validates a parsed JSON-RPC request and runs it against the
@@ -592,8 +646,34 @@ func handleStreamableRequest(w http.ResponseWriter, r *http.Request, reg *Regist
 		return
 	}
 
+	// Resolve (or establish) the session for this request. An initialize
+	// request without a session header starts a new MCP session and is answered
+	// with the session id, which the client echoes back on later requests.
+	connID := r.Header.Get(mcpSessionHeader)
+	if connID == "" {
+		connID = r.Header.Get("X-Connection-ID")
+	}
+	if connID == "" {
+		connID = r.URL.Query().Get("sessionId")
+	}
+	isInitialize := false
+	if m, ok := raw.(map[string]interface{}); ok && m["method"] == "initialize" {
+		isInitialize = true
+	}
+	if connID != "" {
+		ensureStreamableSession(connID)
+	}
+	if isInitialize && connID == "" {
+		connID = uuid.New().String()
+		ensureStreamableSession(connID)
+		serverLog.Info("streamable MCP session established", "conn_id", connID)
+	}
+
 	respond := func(resp jsonRPCResponse) {
 		w.Header().Set("Content-Type", "application/json")
+		if connID != "" {
+			w.Header().Set(mcpSessionHeader, connID)
+		}
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(resp)
 	}
@@ -602,27 +682,65 @@ func handleStreamableRequest(w http.ResponseWriter, r *http.Request, reg *Regist
 		// Batch: respond with an array of results.
 		var responses []jsonRPCResponse
 		for _, item := range arr {
-			resp, isNotification := dispatchRawItem(r, item, reg)
+			resp, isNotification := dispatchRawItem(r, item, reg, connID)
 			if !isNotification {
 				responses = append(responses, resp)
+				maybeEmitStreamableView(reg, connID, item, resp)
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if connID != "" {
+			w.Header().Set(mcpSessionHeader, connID)
+		}
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(responses)
 		return
 	}
 
-	resp, isNotification := dispatchRawItem(r, raw, reg)
+	resp, isNotification := dispatchRawItem(r, raw, reg, connID)
 	if isNotification {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
+	maybeEmitStreamableView(reg, connID, raw, resp)
 	respond(resp)
 }
 
+// ensureStreamableSession registers the broadcast channel for a session that
+// was established by a streamable HTTP initialize, so server->client
+// notifications (views, tools/list_changed) have a queue to land on.
+func ensureStreamableSession(connID string) {
+	if connID == "" {
+		return
+	}
+	connMutex.Lock()
+	defer connMutex.Unlock()
+	if _, ok := activeConnections[connID]; !ok {
+		activeConnections[connID] = make(chan jsonRPCResponse, messageChannelBufferSize)
+	}
+}
+
+// maybeEmitStreamableView mirrors a tools/call outcome onto the session's view
+// stream, exactly like the legacy SSE POST path. This is what lets a stateless
+// streamable HTTP agent drive the board: every operation it runs becomes a
+// notifications/view on the shared session stream.
+func maybeEmitStreamableView(reg *Registry, connID string, item interface{}, resp jsonRPCResponse) {
+	if connID == "" {
+		return
+	}
+	if tr, ok := resp.Result.(ToolResultPayload); ok {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			return
+		}
+		if tool := toolNameFromParams(m["params"]); tool != "" {
+			reg.emitToolResultView(connID, tool, tr, toolArgsFromParams(m["params"]))
+		}
+	}
+}
+
 // dispatchRawItem unmarshals one JSON-RPC request object and dispatches it.
-func dispatchRawItem(r *http.Request, item interface{}, reg *Registry) (jsonRPCResponse, bool) {
+func dispatchRawItem(r *http.Request, item interface{}, reg *Registry, connID string) (jsonRPCResponse, bool) {
 	reqBytes, err := json.Marshal(item)
 	if err != nil {
 		return createJSONRPCError(nil, -32600, "Invalid request", nil), false
@@ -637,7 +755,7 @@ func dispatchRawItem(r *http.Request, item interface{}, reg *Registry) (jsonRPCR
 	if err := json.Unmarshal(reqBytes, &req); err != nil {
 		return createJSONRPCError(reqID, -32600, "Invalid Request", err.Error()), false
 	}
-	return dispatchJSONRPC("", &req, reqID, reg)
+	return dispatchJSONRPC(connID, &req, reqID, reg)
 }
 
 // --- JSON-RPC Message Handlers --- // Implementations returning jsonRPCResponse
@@ -679,6 +797,14 @@ func handleInitializeJSONRPC(connID string, req *jsonRPCRequest) jsonRPCResponse
 			"version": "openapi-mcp-0.1.0", // Your server version
 		},
 		"connectionId": connID, // Include the connection ID
+	}
+	if connID != "" {
+		// Streamable HTTP session handoff: the client echoes this back via the
+		// Mcp-Session-Id header so every later request stays on this session.
+		resultPayload["_meta"] = map[string]interface{}{
+			"sessionId":  connID,
+			"session_ui": fmt.Sprintf("/ui?sessionId=%s", connID),
+		}
 	}
 
 	return jsonRPCResponse{
