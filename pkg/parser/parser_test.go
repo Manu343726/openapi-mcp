@@ -714,7 +714,7 @@ func TestGenerateToolSet(t *testing.T) {
 				Tools: []mcp.Tool{
 					{
 						Name:        "getPing",
-						Description: "Note: The API key is handled by the server, no need to provide it. Simple ping endpoint",
+						Description: "Simple ping endpoint",
 						InputSchema: mcp.Schema{Type: "object", Properties: map[string]mcp.Schema{}, Required: []string{}},
 					},
 				},
@@ -740,7 +740,7 @@ func TestGenerateToolSet(t *testing.T) {
 				Tools: []mcp.Tool{
 					{
 						Name:        "getHealth",
-						Description: "Note: The API key is handled by the server, no need to provide it. Simple health check",
+						Description: "Simple health check",
 						InputSchema: mcp.Schema{Type: "object", Properties: map[string]mcp.Schema{}, Required: []string{}},
 					},
 				},
@@ -770,7 +770,7 @@ func TestGenerateToolSet(t *testing.T) {
 				Tools: []mcp.Tool{
 					{
 						Name:        "getPing",
-						Description: "Note: The API key is handled by the server, no need to provide it. Simple ping endpoint",
+						Description: "Simple ping endpoint",
 						InputSchema: mcp.Schema{Type: "object", Properties: map[string]mcp.Schema{}, Required: []string{}},
 					},
 				},
@@ -877,7 +877,7 @@ func TestGenerateToolSet(t *testing.T) {
 				Tools: []mcp.Tool{
 					{
 						Name:        "testParams",
-						Description: "Note: The API key is handled by the server, no need to provide it. Test various params",
+						Description: "Test various params",
 						InputSchema: mcp.Schema{
 							Type: "object",
 							Properties: map[string]mcp.Schema{
@@ -922,7 +922,7 @@ func TestGenerateToolSet(t *testing.T) {
 				Tools: []mcp.Tool{
 					{
 						Name:        "testV2Params",
-						Description: "Note: The API key is handled by the server, no need to provide it. Test V2 params and ref",
+						Description: "Test V2 params and ref",
 						InputSchema: mcp.Schema{
 							Type: "object",
 							Properties: map[string]mcp.Schema{
@@ -965,7 +965,7 @@ func TestGenerateToolSet(t *testing.T) {
 				Tools: []mcp.Tool{
 					{
 						Name:        "processArrays",
-						Description: "Note: The API key is handled by the server, no need to provide it. Process arrays",
+						Description: "Process arrays",
 						InputSchema: mcp.Schema{
 							Type: "object",
 							Properties: map[string]mcp.Schema{
@@ -1000,7 +1000,7 @@ func TestGenerateToolSet(t *testing.T) {
 				Tools: []mcp.Tool{
 					{
 						Name:        "getArrays",
-						Description: "Note: The API key is handled by the server, no need to provide it. Get arrays",
+						Description: "Get arrays",
 						InputSchema: mcp.Schema{
 							Type: "object",
 							Properties: map[string]mcp.Schema{
@@ -1035,7 +1035,7 @@ func TestGenerateToolSet(t *testing.T) {
 				Tools: []mcp.Tool{
 					{
 						Name:        "uploadFile",
-						Description: "Note: The API key is handled by the server, no need to provide it. Upload file",
+						Description: "Upload file",
 						InputSchema: mcp.Schema{
 							Type: "object",
 							Properties: map[string]mcp.Schema{
@@ -1170,5 +1170,49 @@ func TestSpecSourceModified(t *testing.T) {
 
 	t.Run("empty source is unknown", func(t *testing.T) {
 		assert.True(t, SpecSourceModified("").IsZero())
+	})
+}
+
+// TestGenerateToolSet_APIKeyNoteGating pins the server-side-key note to only
+// appear when the server actually owns an API key: keyless APIs must not carry
+// the "Note: The API key is handled by the server" boilerplate, because over a
+// fleet of operations that is pure prompt-context waste.
+func TestGenerateToolSet_APIKeyNoteGating(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "minimal_v3.json")
+	require.NoError(t, os.WriteFile(path, []byte(minimalV3SpecJSON), 0644))
+	doc, version, err := LoadSwagger(path)
+	require.NoError(t, err)
+	require.Equal(t, VersionV3, version)
+	spec := doc.(*openapi3.T)
+
+	const withNote = "Note: The API key is handled by the server, no need to provide it. Simple ping endpoint"
+
+	t.Run("keyless config omits the note", func(t *testing.T) {
+		ts, err := GenerateToolSet(spec, VersionV3, &config.Config{})
+		require.NoError(t, err)
+		require.Len(t, ts.Tools, 1)
+		assert.Equal(t, "Simple ping endpoint", ts.Tools[0].Description)
+	})
+
+	t.Run("configured API key includes the note", func(t *testing.T) {
+		ts, err := GenerateToolSet(spec, VersionV3, &config.Config{
+			APIKeyName:     "apikey",
+			APIKeyLocation: config.APIKeyLocationHeader,
+		})
+		require.NoError(t, err)
+		require.Len(t, ts.Tools, 1)
+		assert.Equal(t, withNote, ts.Tools[0].Description)
+	})
+
+	t.Run("keyless V2 config omits the note", func(t *testing.T) {
+		pathV2 := filepath.Join(t.TempDir(), "minimal_v2.json")
+		require.NoError(t, os.WriteFile(pathV2, []byte(minimalV2SpecJSON), 0644))
+		docV2, versionV2, err := LoadSwagger(pathV2)
+		require.NoError(t, err)
+		require.Equal(t, VersionV2, versionV2)
+		ts, err := GenerateToolSet(docV2, VersionV2, &config.Config{})
+		require.NoError(t, err)
+		require.Len(t, ts.Tools, 1)
+		assert.Equal(t, "Simple health check", ts.Tools[0].Description)
 	})
 }

@@ -35,6 +35,29 @@ RUN set -eux; \
     npm install -g --prefix /usr/local @debugmcp/mcp-debugger; \
     mcp-debugger --version
 
+# MCP Inspector (@modelcontextprotocol/inspector) is a 3-in-1 MCP client for
+# manual/CLI/TUI exploration of a running server (web UI by default;
+# `mcp-inspector --cli` / `--tui`; connects to the server's /mcp endpoint).
+# Pinned at 2.6.0; installed globally under /usr/local so `mcp-inspector` and
+# `npx @modelcontextprotocol/inspector` both resolve on PATH.
+RUN set -eux; \
+    npm install -g --prefix /usr/local @modelcontextprotocol/inspector@2.6.0; \
+    mcp-inspector --help
+
+# mcp-tokens (https://github.com/sd2k/mcp-tokens) is a Rust CLI that spawns an
+# MCP server, runs tools/list itself, and prints per-tool token/cost
+# breakdowns; its baseline + threshold flags make it a CI gate for prompt
+# surface growth. Installed from the pinned v0.2.5 prebuilt release with the
+# published sha256 verified, so `mcp-tokens analyze -- <cmd>` works.
+RUN set -eux; \
+    cd /tmp; \
+    curl -fsSL -o mcp-tokens.tar.xz https://github.com/sd2k/mcp-tokens/releases/download/v0.2.5/mcp-tokens-x86_64-unknown-linux-gnu.tar.xz; \
+    echo "f53f5565b0a5ea1dd5930be6e1199a9e648c15b932b262803b25da784d5c03ba *mcp-tokens.tar.xz" | sha256sum -c -; \
+    tar -xJf mcp-tokens.tar.xz; \
+    install -m 0755 mcp-tokens-x86_64-unknown-linux-gnu/mcp-tokens /usr/local/bin/mcp-tokens; \
+    rm -rf mcp-tokens.tar.xz mcp-tokens-x86_64-unknown-linux-gnu; \
+    mcp-tokens --version
+
 # --- Container runtime conveniences for the code in this repo ---
 
 # The MCP server reads a JSON config file that is written back to on runtime

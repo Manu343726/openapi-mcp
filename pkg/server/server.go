@@ -5,11 +5,13 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -126,6 +128,11 @@ var connLogLevels = make(map[string]int)
 // Channel buffer size
 const messageChannelBufferSize = 10
 
+// maxMCPBodyBytes caps a single /mcp request body. A request over the cap is
+// rejected with a JSON-RPC -32700 parse error (HTTP 413) instead of being
+// buffered in full by io.ReadAll.
+const maxMCPBodyBytes = 16 << 20 // 16 MiB
+
 // mcpSessionHeader is the MCP streamable-HTTP session header. A session id is
 // issued on initialize (echoed in the initialize result _meta.sessionId and on
 // the Mcp-Session-Id response header) and must be echoed back by the client on
@@ -181,7 +188,42 @@ func ServeMCP(addr string, reg *Registry) error {
 	}
 
 	serverLog.Info("MCP server listening", "addr", addr+"/mcp")
-	return http.ListenAndServe(addr, mux)
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           recoveryMiddleware(mux),
+		ReadHeaderTimeout: 30 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		// WriteTimeout is intentionally left at zero: SSE and /ui/chat streams
+		// hold the connection open while writing, and a WriteTimeout would cut
+		// them off mid-stream.
+	}
+	return srv.ListenAndServe()
+}
+
+// recoveryMiddleware converts a panic anywhere in the handler stack into a
+// 500 response (a JSON-RPC -32603 error for /mcp POSTs) instead of letting a
+// single request take down the whole server. The panic is logged with a stack
+// trace. If the response was already partially written (e.g. mid-SSE-stream),
+// the WriteHeader is a no-op and the connection just closes.
+func recoveryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				serverLog.Error("panic recovered in HTTP handler",
+					"method", r.Method, "path", r.URL.Path,
+					"panic", fmt.Sprintf("%v", rec), "stack", string(debug.Stack()))
+				if r.Method == http.MethodPost && r.URL.Path == "/mcp" {
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(createJSONRPCError(nil, -32603,
+						"Internal error", fmt.Sprintf("%v", rec)))
+					return
+				}
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // httpMethodGetHandler handles the initial GET request to establish the SSE
@@ -281,7 +323,15 @@ func httpMethodGetHandler(w http.ResponseWriter, r *http.Request, regs ...*Regis
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
+	// The writer goroutine touches w, so the handler must not return until the
+	// writer has stopped flushing: otherwise net/http finalizes the response
+	// concurrently with a goroutine still writing and the race is detected.
+	var writerWG sync.WaitGroup
+	writerWG.Add(1)
+	defer writerWG.Wait()
+
 	go func() {
+		defer writerWG.Done()
 		serverLog.Debug("sse writer starting", "conn_id", connectionID)
 		defer serverLog.Debug("sse writer exiting", "conn_id", connectionID)
 		for {
@@ -377,6 +427,11 @@ func writeSSEEvent(w http.ResponseWriter, eventName string, data interface{}) er
 //     and answered with a JSON-RPC body (this is what modern clients such as
 //     opencode use).
 func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, reg *Registry) {
+	// Cap the request body so a single oversized POST can't be buffered in
+	// full by io.ReadAll. The cap trips into a JSON-RPC -32700 parse error for
+	// streamable clients and a queued parse error for legacy SSE clients.
+	r.Body = http.MaxBytesReader(w, r.Body, maxMCPBodyBytes)
+
 	// A streamable-HTTP client identifies itself with the Mcp-Session-Id header
 	// (issued at initialize) and always expects a synchronous JSON body back.
 	// Legacy SSE clients POST with X-Connection-ID / ?sessionId= and want their
@@ -636,7 +691,17 @@ func handleStreamableRequest(w http.ResponseWriter, r *http.Request, reg *Regist
 	}
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "failed to read body", http.StatusBadRequest)
+		var tooLarge *http.MaxBytesError
+		msg := "Failed to read MCP request body"
+		status := http.StatusBadRequest
+		if errors.As(err, &tooLarge) {
+			msg = fmt.Sprintf("MCP request body exceeds the %d byte limit", tooLarge.Limit)
+			status = http.StatusRequestEntityTooLarge
+		}
+		serverLog.Error("error reading MCP request body", "error", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(createJSONRPCError(nil, -32700, "Parse error reading request body", msg))
 		return
 	}
 

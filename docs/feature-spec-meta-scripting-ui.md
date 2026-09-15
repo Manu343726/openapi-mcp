@@ -1337,11 +1337,31 @@ next to a Library tab that launches dashboards/views onto the board
 `webui/src/components/`). Bundle in git-ignored `webui/dist/`, embedded via
 `go:embed`; `make build` runs `make webui` first.
 
-**Latest landed (this session — production hardening, not a phase):** feature
-flags in `pkg/config` (`server.features`): only the **web UI is beta and off by
-default**; knowledge/meta/scripts/api-registration/api-introspection/api-exposure
-all have flags and default **on**. Each flag gates both the `tools/list` surface
-and direct `tools/call` dispatch (`pkg/server/features.go`,
+**Latest landed (this session — production hardening, not a phase):**
+
+- **Hardening** (server.go): 16 MiB request-body cap (`-32700` on malformed
+  JSON, `-32000`/413 on oversize), panic-recovery middleware (`-32603`/500),
+  `http.Server` read/write/idle timeouts, API-key note only prepended when the
+  API actually configures a key. Pinned by `pkg/server/hardening_test.go`.
+- **Stdio transport** (`--stdio`, `pkg/server/stdio.go`): line-delimited
+  JSON-RPC over stdio with logs on stderr — enables stdio-only clients and the
+  token counters below; mcp-tokens integration relies on it.
+- **External-tool surface tests** (`pkg/server/external_tools_test.go`): the Go
+  runner drives the two installed third-party tools (skips cleanly when absent
+  or under `-short`). **mcp-tokens** (offline tiktoken) spawns the real binary
+  over stdio — asserts a pure-tools surface, per-item
+  `tokens == description_tokens + schema_tokens`, a token budget
+  (default 53 tools ≈ 7.5k tokens; registered ops bounded per-op), and
+  byte-for-byte deterministic totals across runs (the prompt-cache guarantee).
+  **MCP Inspector (`--cli`)** connects over real streamable HTTP — tool count/
+  presence/shape, `--strict` schema portability exit 0, a `tools/call`
+  round-trip, and feature-flag surface shrinkage. Fixing a latent data race in
+  the SSE GET handler (writer goroutine joined before handler return).
+
+Feature flags in `pkg/config` (`server.features`): only the **web UI is beta
+and off by default**; knowledge/meta/scripts/api-registration/api-introspection/
+api-exposure all have flags and default **on**. Each flag gates both the
+`tools/list` surface and direct `tools/call` dispatch (`pkg/server/features.go`,
 `gatedToolsLocked`, `runManagementTool`); the legacy `server.ui.enabled: true`
 still forces the UI on. Tool surface and serialized discovery-payload budgets are
 pinned in tests (`pkg/server/features_test.go`), a real streamable-HTTP MCP

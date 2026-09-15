@@ -35,6 +35,7 @@ go build ./...                       # compile check without emitting a binary
 bin/openapi-mcp --port 8080
 bin/openapi-mcp --config .config/config.yaml --port 8086
 bin/openapi-mcp --log-level debug    # structured logs on stdout
+bin/openapi-mcp --stdio              # stdio transport (JSON-RPC over stdio; logs go to stderr)
 ```
 
 ### Test timeout caveat
@@ -126,6 +127,21 @@ The Go test suite drives the real server over real HTTP — no MCP client needed
   streams.
 - `pkg/server/features_test.go` pins the tool surface per feature flag and the
   discovery-payload size budgets.
+- `pkg/server/prompt_surface_test.go` is the **prompt-surface suite**: it treats
+  the `tools/list` payload as the thing a real AI harness injects into the model
+  context at startup/discovery and budgets every contribution to it — per-tool
+  name/description/schema, per-feature-group bytes (with `~bytes/4` token
+  estimates), per-registered-operation growth (must be linear, ~1.5 KB/op for a
+  verbose 40-op spec), the 100-char tool-name cap under pathological
+  operationIds, **byte-identical repeated discovery** (the LLM prompt-cache
+  guarantee), session-level exposure shrinkage, and wire-vs-in-process
+  equivalence. Rule: when a budget fails, shrink the surface — do not loosen the
+  budget. Diagnostics (`t.Logf`) print the group-by-group shares and the largest
+  tools so over-verbose descriptions are greppable in test output.
+- A useful adjacent guard: the parser prepends the "API key is handled by the
+  server" note to a tool description **only when the API actually configures an
+  API key** (`pkg/parser/parser.go`) — keyless boilerplate on every operation is
+  exactly the context waste these budgets exist to catch.
 
 The **official MCP conformance suite**
 ([`modelcontextprotocol/conformance`](https://github.com/modelcontextprotocol/conformance),
@@ -135,6 +151,38 @@ optional here because the Go package has no Node dependency for tests, but run
 it against a booted server as a pre-release check. (The MCP SDK clients —
 Python `mcp`, Node `@modelcontextprotocol/sdk` — are alternative external
 harnesses.)
+
+Additional external tooling:
+
+- **MCP Inspector** ([`@modelcontextprotocol/inspector`](https://modelcontextprotocol.io/docs/2026-07-28/tools/inspector))
+  is three MCP client UIs in one binary: a web dashboard
+  (`npx @modelcontextprotocol/inspector`), a scriptable/CI CLI (`--cli`), and a
+  TUI (`--tui`). It negotiates both the legacy and the 2026-07-28 protocol eras,
+  so it can drive this server for interactive exploration and smoke tests that
+  the Go harness does not cover.
+- **mcp-tokens** ([`sd2k/mcp-tokens`](https://github.com/sd2k/mcp-tokens))
+  converts a `tools/list` payload into per-tool token counts and approximate
+  costs; use it to spot-check the same numbers the Go prompt-surface suite
+  asserts.
+
+Both are wired into the Go test runner (`go test ./pkg/server/ -run 'TestExternalTools'`,
+skipped automatically when the binaries are absent or under `-short`):
+
+- `TestExternalTools_MCPTokensSurface` spawns the real server binary over the
+  stdio transport (`--stdio`), lets mcp-tokens count with the offline tiktoken
+  model, and asserts the surface is pure tools (per-item
+  `tokens == description_tokens + schema_tokens`), stays inside the token
+  budget, is byte-for-byte deterministic across runs (the prompt-cache
+  guarantee, checked through an independent counter), and that registered
+  operations add tools at a bounded per-op cost.
+- `TestExternalTools_InspectorSurface` connects the reference client over real
+  streamable HTTP and asserts the surface an agent receives: full tool set with
+  name/description/inputSchema, `--strict` schema portability passes clean,
+  a `tools/call` round-trip, feature flags shrink the surface exactly, and
+  registered operations appear as `bench__*` tools.
+- Keep discovery payloads stable across requests (the suite enforces it):
+  LLM providers key **prompt caches on byte-identical tool lists**, so a
+  deterministically ordered `tools/list` is a direct cost saving per agent turn.
 
 ### 4. Reference OpenAPI specs for manual / integration testing
 
@@ -195,6 +243,29 @@ full reference in [`docs/config-file.md`](config-file.md).
 To exercise a gated path in tests, call `SetServerConfig` on the test registry
 with the relevant flags mutated — see `pkg/server/features_test.go` for the
 pattern.
+
+## HTTP / MCP hardening
+
+Production posture enforced on the wire and covered by tests
+(`pkg/server/hardening_test.go`):
+
+- **Request body cap**: a single `/mcp` POST is limited to 16 MiB
+  (`maxMCPBodyBytes`, applied via `http.MaxBytesReader` in
+  `httpMethodPostHandler`). Oversized streamable requests get a JSON-RPC
+  -32700 with the limit in `error.data` and an HTTP 413; legacy SSE POSTs get a
+  queued -32700 on the session channel. The `/ui/chat` (1 MiB) and AG-UI run
+  (2 MiB) endpoints cap bodies independently.
+- **Panic recovery**: `recoveryMiddleware` wraps the mux, so a panic in any
+  handler is logged with a stack trace and answered with a JSON-RPC -32603 (for
+  `/mcp` POSTs) or a 500 instead of taking the process down. If headers were
+  already flushed (mid-SSE-stream) the recovery write is a no-op and the
+  connection closes.
+- **Server timeouts**: `ServeMCP` now runs an `http.Server` with
+  `ReadHeaderTimeout: 30s`, `ReadTimeout: 60s`, `IdleTimeout: 2m` (slow-loris /
+  stuck-keepalive protection). `WriteTimeout` stays 0 deliberately — SSE and
+  `/ui/chat` streams hold the connection open while writing.
+- **Race detector**: `go test -race ./pkg/server/...` passes; follow it, and
+  remember registry/connection maps are guarded by `connMutex`.
 
 ## Known quirks
 

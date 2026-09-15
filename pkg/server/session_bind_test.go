@@ -183,8 +183,8 @@ func TestUIEventsReplaysAndBindsToSession(t *testing.T) {
 				continue
 			}
 			var msg struct {
-				Method string                   `json:"method"`
-				Params map[string]interface{}   `json:"params"`
+				Method string                 `json:"method"`
+				Params map[string]interface{} `json:"params"`
 			}
 			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &msg); err != nil {
 				continue

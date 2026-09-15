@@ -310,13 +310,13 @@ func TestFeaturesConfigDefaults(t *testing.T) {
 func TestFeaturesConfigOverrides(t *testing.T) {
 	off, on := false, true
 	f := FeaturesConfig{
-		WebUI:           &off,
-		Knowledge:       &off,
-		Meta:            &off,
-		Scripts:         &off,
-		APIRegistration: &off,
+		WebUI:            &off,
+		Knowledge:        &off,
+		Meta:             &off,
+		Scripts:          &off,
+		APIRegistration:  &off,
 		APIIntrospection: &off,
-		APIExposure:     &off,
+		APIExposure:      &off,
 	}
 	assert.False(t, f.WebUIEnabled())
 	assert.False(t, f.KnowledgeEnabled())
@@ -362,14 +362,14 @@ func TestServerConfigWebUIEnabledLegacyCompat(t *testing.T) {
 func TestFeaturesConfigRoundTrip(t *testing.T) {
 	off := false
 	want := FeaturesConfig{
-		Enabled:         &off,
-		WebUI:           &off,
-		APIRegistration: &off,
+		Enabled:          &off,
+		WebUI:            &off,
+		APIRegistration:  &off,
 		APIIntrospection: &off,
-		APIExposure:     &off,
-		Knowledge:       &off,
-		Meta:            &off,
-		Scripts:         &off,
+		APIExposure:      &off,
+		Knowledge:        &off,
+		Meta:             &off,
+		Scripts:          &off,
 	}
 
 	yb, err := yaml.Marshal(want)

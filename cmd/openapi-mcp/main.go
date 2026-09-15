@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,16 +19,22 @@ func main() {
 	configPath := flag.String("config", "", "Path to a YAML config file listing APIs, targets and auth. Runtime registrations via MCP tools are written back to this file so they survive restarts. When omitted the server starts with an empty, non-persisted registry.")
 	portFlag := flag.Int("port", 8080, "Port to run the MCP server on (overridden by server.port in the config file)")
 	logLevel := flag.String("log-level", "info", "Minimum log level to emit: debug, info, warn or error")
+	stdioMode := flag.Bool("stdio", false, "Serve MCP over stdio (newline-delimited JSON-RPC on stdin/stdout) instead of HTTP. Scripts, management tools and the model-context surface are identical; use it from stdio MCP clients or analyzers such as mcp-tokens.")
 
 	flag.Parse()
 
-	// --- Logging: structured, human-readable lines on stdout ---
+	// --- Logging: structured, human-readable lines as stderr (stdio mode must
+	// keep stdout clean of anything but JSON-RPC) or stdout otherwise ---
+	logOut := os.Stdout
+	if *stdioMode {
+		logOut = os.Stderr
+	}
 	level, err := logx.ParseLevel(*logLevel)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Invalid --log-level: %v\n", err)
 		os.Exit(2)
 	}
-	logx.Configure(os.Stdout, level)
+	logx.Configure(logOut, level)
 	log := logx.Module("main")
 
 	// --- Registry (persists runtime registrations to --config when given) ---
@@ -90,12 +97,25 @@ func main() {
 		}
 	}
 	addr := fmt.Sprintf(":%d", port)
+	if *stdioMode {
+		addr = "stdio"
+	}
 	log.Info("starting MCP server", "addr", addr)
 	if path := reg.PersistencePath(); path == "" {
 		log.Info("no --config given; runtime registrations are NOT persisted across restarts")
 	} else {
 		log.Info("runtime registrations will be persisted", "path", path)
 	}
+
+	if *stdioMode {
+		log.Info("serving MCP over stdio", "config", *configPath)
+		if err := server.ServeStdio(context.Background(), reg); err != nil {
+			log.Error("failed to serve MCP over stdio", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	err = server.ServeMCP(addr, reg)
 	if err != nil {
 		log.Error("failed to start server", "error", err, "addr", addr)

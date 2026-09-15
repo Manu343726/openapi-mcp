@@ -457,8 +457,14 @@ func generateToolSetV3(doc *openapi3.T, cfg *config.Config) (*mcp.ToolSet, error
 				}
 			}
 
-			// Prepend note about API key handling
-			finalToolDesc := "Note: The API key is handled by the server, no need to provide it. " + toolDesc
+			// Prepend a note about server-side key handling, but ONLY when the
+			// server actually owns an API key for this API (injected from
+			// config). Repeating keyless boilerplate on every tool just burns
+			// prompt context - and is factually wrong for keyless APIs.
+			finalToolDesc := toolDesc
+			if cfg.APIKeyName != "" {
+				finalToolDesc = "Note: The API key is handled by the server, no need to provide it. " + toolDesc
+			}
 
 			tool := mcp.Tool{
 				Name:        toolName,
@@ -756,8 +762,13 @@ func generateToolSetV2(doc *spec.Swagger, cfg *config.Config) (*mcp.ToolSet, err
 				}
 			}
 
-			// Prepend note about API key handling
-			finalToolDesc := "Note: The API key is handled by the server, no need to provide it. " + toolDesc
+			// Prepend a note about server-side key handling, but ONLY when the
+			// API key is configured (injected server-side). Keyless boilerplate
+			// on every tool would cost prompt context for no information.
+			finalToolDesc := toolDesc
+			if apiKeyName != "" {
+				finalToolDesc = "Note: The API key is handled by the server, no need to provide it. " + toolDesc
+			}
 
 			tool := mcp.Tool{
 				Name:        toolName,
