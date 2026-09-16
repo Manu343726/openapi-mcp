@@ -1101,19 +1101,24 @@ func (r *Registry) RememberSequence(connID, apiName, name string) (string, error
 	}
 	steps := make([]knowledge.Step, 0, len(calls))
 	for _, t := range calls {
-		inputs := map[string]knowledge.InputBinding{}
-		for k, v := range t.Input {
-			if k == targetArgName {
-				continue
-			}
-			if s, ok := v.(string); ok {
-				inputs[k] = knowledge.InputBinding{From: "param." + s}
+		if len(t.Input) == 0 {
+			steps = append(steps, knowledge.Step{Tool: t.Tool})
+			continue
+		}
+		keys := make([]string, 0, len(t.Input))
+		for k := range t.Input {
+			if k != targetArgName {
+				keys = append(keys, k)
 			}
 		}
-		steps = append(steps, knowledge.Step{
-			Tool:   t.Tool,
-			Inputs: inputs,
-		})
+		sort.Strings(keys)
+		inputs := map[string]knowledge.InputBinding{}
+		for _, k := range keys {
+			if b, ok := recommendedBinding(t.Input[k]); ok {
+				inputs[k] = b
+			}
+		}
+		steps = append(steps, knowledge.Step{Tool: t.Tool, Inputs: inputs})
 	}
 	doc := &knowledge.Doc{
 		ID:       name,
@@ -1154,6 +1159,35 @@ func (r *Registry) RememberSequence(connID, apiName, name string) (string, error
 	}
 	msg += fmt.Sprintf(" Persisted to %s as a draft; promote it with knowledge_promote (confirm=true) to make it a real capability.", rel)
 	return pushAfterEdit(backend, msg)
+}
+
+// recommendedBinding materializes a recorded tool argument as a literal input
+// binding. The value is kept exactly as recorded so the generated draft
+// replays the call faithfully: strings pass through verbatim (JSON-quoted when
+// they would otherwise read as a number/bool literal), and numbers, booleans
+// and nested objects use their JSON encoding so the type survives.
+func recommendedBinding(v interface{}) (knowledge.InputBinding, bool) {
+	switch t := v.(type) {
+	case nil:
+		return knowledge.InputBinding{}, false
+	case string:
+		from := t
+		var chk interface{}
+		if json.Unmarshal([]byte(t), &chk) == nil {
+			if _, isStr := chk.(string); !isStr {
+				if raw, err := json.Marshal(t); err == nil {
+					from = string(raw)
+				}
+			}
+		}
+		return knowledge.InputBinding{From: from}, true
+	default:
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return knowledge.InputBinding{}, false
+		}
+		return knowledge.InputBinding{From: string(raw)}, true
+	}
 }
 
 // KnowledgeSuggestions lists the knowledge library's draft capability

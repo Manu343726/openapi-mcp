@@ -859,6 +859,41 @@ func TestReloadAPIManagementTool(t *testing.T) {
 	assert.Contains(t, res.text, "not registered")
 }
 
+// TestCheckSpecStateETagFallback: URL sources that omit Last-Modified but
+// serve an ETag must still resolve freshness (the live Petstore source is one
+// such endpoint).
+func TestCheckSpecStateETagFallback(t *testing.T) {
+	etag := `"v1"`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", etag)
+		fmt.Fprint(w, registryTestV3Spec)
+	}))
+	defer srv.Close()
+
+	reg := NewRegistry("")
+	_, err := reg.RegisterAPI(config.APIDefinition{Name: "taggy", Source: srv.URL}, false)
+	require.NoError(t, err)
+
+	// No Last-Modified anywhere, so timestamps are never usable; the status
+	// must resolve via ETag comparison.
+	_, _, status, err := reg.CheckSpecState("taggy")
+	require.NoError(t, err)
+	assert.Equal(t, SpecStatusUpToDate, status)
+
+	// The spec changes on the server: the ETag differs -> outdated.
+	etag = `"v2"`
+	_, _, status, err = reg.CheckSpecState("taggy")
+	require.NoError(t, err)
+	assert.Equal(t, SpecStatusOutdated, status)
+
+	// Reload re-reads the source and records the new ETag -> fresh again.
+	_, err = reg.ReloadAPI("taggy")
+	require.NoError(t, err)
+	_, _, status, err = reg.CheckSpecState("taggy")
+	require.NoError(t, err)
+	assert.Equal(t, SpecStatusUpToDate, status)
+}
+
 func TestKnowledgeToolsRegistered(t *testing.T) {
 	reg := NewRegistry("")
 	names := toolNames(reg.Tools())

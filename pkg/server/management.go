@@ -148,8 +148,14 @@ func buildManagementTools() []mcp.Tool {
 		},
 		{
 			Name:        ToolAPIExposure,
-			Description: "Report an API's runtime footprint: global baseline and this session's effective exposure (active, mode, active/disabled tags and ops), totals (total/allowed/exposed/excluded-by-config), and — when 'api' is set — the per-operation status (exposed | hidden | session-hidden | excluded-by-config) so the agent knows exactly what it can toggle with update_session_api_exposure.",
-			InputSchema: nameOnlySchema("api", "Name of the registered API (omit for a full footprint report across all APIs)"),
+			Description: "Report an API's runtime footprint: global baseline and this session's effective exposure (active, mode, active/disabled tags and ops), totals (total/allowed/exposed/excluded-by-config), and — when 'api' is set — the per-operation status (exposed | hidden | session-hidden | excluded-by-config) so the agent knows exactly what it can toggle with update_session_api_exposure. Use include=[summary] to omit the per-operation rows.",
+			InputSchema: mcp.Schema{
+				Type: "object",
+				Properties: map[string]mcp.Schema{
+					"api":     {Type: "string", Description: "Name of the registered API (omit for a full footprint report across all APIs)"},
+					"include": stringListProp("[summary] omits the per-operation status rows; omit for the full report"),
+				},
+			},
 		},
 		{
 			Name:        ToolDescribeAPI,
@@ -673,10 +679,17 @@ func (r *Registry) runManagementTool(connID, name string, args map[string]interf
 		}
 		return okResult(fmt.Sprintf("Cleared this session's footprint override for API %q (reverted to the global baseline).", api))
 	case ToolAPIExposure:
+		include := map[string]bool{}
+		for _, inc := range strSliceArg(args, "include") {
+			include[strings.ToLower(inc)] = true
+		}
 		if api := strArg(args, "api"); api != "" {
 			report, err := r.exposureReportForSession(connID, api)
 			if err != nil {
 				return errResult(err)
+			}
+			if include["summary"] {
+				delete(report, "operations")
 			}
 			body, _ := json.MarshalIndent(report, "", "  ")
 			return okResult(string(body))
@@ -836,7 +849,7 @@ func (r *Registry) runManagementTool(connID, name string, args map[string]interf
 		case SpecStatusUpToDate:
 			b.WriteString("  The loaded spec matches the source.")
 		default:
-			b.WriteString("  Cannot compare: the spec source has no usable timestamp (inline spec or no Last-Modified header).")
+			b.WriteString("  Cannot compare: the spec source has no usable Last-Modified or ETag (inline spec, or the server omits both).")
 		}
 		return okResult(b.String())
 	case ToolReloadAPI:

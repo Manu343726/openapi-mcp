@@ -1357,6 +1357,22 @@ next to a Library tab that launches dashboards/views onto the board
   presence/shape, `--strict` schema portability exit 0, a `tools/call`
   round-trip, and feature-flag surface shrinkage. Fixing a latent data race in
   the SSE GET handler (writer goroutine joined before handler return).
+- **Live-feature fixes found while dogfooding the Petstore API through the MCP
+  tools:** `knowledge_remember_sequence` now materializes the **recorded
+  arguments** as literal step inputs (numbers stay numbers, strings stay
+  strings, no synthetic `param.<value>` bindings) and the promoted
+  `scripts/*.tengo` generator inlines those literals (typed via JSON) instead
+  of dropping them — regression-tested end-to-end against a local backend
+  (`pkg/server/scripts_test.go`). Literal step inputs accept **bare scalars**
+  (`qty: 7`, `note: hello`) via a custom `InputBinding` YAML decoder
+  (`pkg/knowledge/model.go`) with type-faithful resolution in
+  `resolveStepInputs`. `run_task` (auto) failures now return the **partial
+  execution transcript** with the error instead of "partial progress above"
+  with nothing above. `check_api_spec` falls back to **ETag comparison** for
+  http(s) sources that omit Last-Modified (the public Petstore endpoint is one)
+  and `api_exposure` gained `include: [summary]` to drop the per-operation
+  rows. Docs: `docs/knowledge.md` now specifies literal inputs and the
+  `view:`/`dashboard` front-matter shape.
 
 Feature flags in `pkg/config` (`server.features`): only the **web UI is beta
 and off by default**; knowledge/meta/scripts/api-registration/api-introspection/

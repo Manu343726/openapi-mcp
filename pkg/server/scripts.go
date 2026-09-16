@@ -604,6 +604,9 @@ func generateScriptFromCapability(cap *knowledge.Doc, scope, id string) string {
 // bindingExpr translates a capability input binding into a tengo expression.
 func bindingExpr(from string) (string, bool) {
 	from = strings.TrimSpace(from)
+	if from == "" {
+		return "", false
+	}
 	switch {
 	case strings.HasPrefix(from, "param."):
 		name := strings.TrimPrefix(from, "param.")
@@ -621,5 +624,26 @@ func bindingExpr(from string) (string, bool) {
 		}
 		return "r" + ref, true
 	}
-	return "", false
+	// Literal value. JSON-encoded values keep their native tengo type; a
+	// string is emitted quoted, and anything else (a bare word) becomes a
+	// tengo string literal.
+	dec := json.NewDecoder(strings.NewReader(from))
+	dec.UseNumber()
+	var v interface{}
+	if err := dec.Decode(&v); err != nil {
+		return strconv.Quote(from), true
+	}
+	switch t := v.(type) {
+	case string:
+		return strconv.Quote(t), true
+	case bool:
+		return strconv.FormatBool(t), true
+	case json.Number:
+		return t.String(), true
+	case nil:
+		return "undefined", true
+	case []interface{}, map[string]interface{}:
+		return from, true // JSON literals are valid tengo array/map literals
+	}
+	return strconv.Quote(from), true
 }

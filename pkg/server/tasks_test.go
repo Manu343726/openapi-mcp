@@ -72,3 +72,48 @@ steps:
 	_, err = reg.RunTask("c1", "acme", "algo ajeno", map[string]interface{}{}, "", TaskModeDryRun)
 	assert.ErrorContains(t, err, "no capability matches")
 }
+
+// TestCapabilityScalarLiteralInputs: bare scalar step inputs (quantity: 1) and
+// JSON-encoded literals ({from: '{"a":1}'}) must parse as literal InputBindings
+// and resolve with their native types instead of failing to unmarshal.
+func TestCapabilityScalarLiteralInputs(t *testing.T) {
+	reg := NewRegistry("")
+	ts := &mcp.ToolSet{Operations: map[string]mcp.OperationDetail{
+		"get_log_entry_pending_logentries_pending_get": {Method: "GET", Path: "/logentries/pending"},
+	}}
+	def := config.APIDefinition{
+		Name:      "acme",
+		Knowledge: config.KnowledgeConfig{Enabled: true, Language: "es"},
+	}
+	reg.mu.Lock()
+	reg.apis["acme"] = &apiEntry{Def: def, ToolSet: ts}
+	reg.mu.Unlock()
+
+	content := `---
+id: lit
+kind: capability
+api: acme
+language: es
+intents: [probar literales]
+steps:
+  - tool: acme__get_log_entry_pending_logentries_pending_get
+    inputs:
+      qty: 7
+      note: hello
+      flag: true
+      zero: '0'
+      nested: {from: '{"a":1}'}
+---
+# Literales
+`
+	_, err := reg.KnowledgeUpsert("c1", "acme", content, "", false)
+	require.NoError(t, err)
+
+	out, err := reg.RunTask("c1", "acme", "probar literales", map[string]interface{}{}, "", TaskModeDryRun)
+	require.NoError(t, err)
+	assert.Contains(t, out, "qty = 7", "numeric scalar resolves to a number")
+	assert.Contains(t, out, "note = hello")
+	assert.Contains(t, out, "flag = true", "boolean scalar resolves to true")
+	assert.Contains(t, out, "zero = 0", "'0' stays a string, not a number")
+	assert.Contains(t, out, "nested = map[", "JSON-typed literal resolves to an object")
+}

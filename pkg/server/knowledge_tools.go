@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/ckanthony/openapi-mcp/pkg/config"
 	"github.com/ckanthony/openapi-mcp/pkg/mcp"
@@ -149,7 +150,7 @@ func buildKnowledgeTools() []mcp.Tool {
 		},
 		{
 			Name:        ToolKnowledgeRemember,
-			Description: "Create a capability draft from the tool calls recorded in this session (requires knowledge.learning enabled on the API). With learning enabled the draft is persisted under _suggestions/; with it disabled the draft stays in the session overlay. Promote a persisted draft with knowledge_promote.",
+			Description: "Create a capability draft from the tool calls recorded in this session (requires knowledge.learning enabled on the API). Recorded input arguments become literal step inputs so the draft replays the calls faithfully. With learning enabled the draft is persisted under _suggestions/; with it disabled the draft stays in the session overlay. Promote a persisted draft with knowledge_promote.",
 			InputSchema: mcp.Schema{
 				Type: "object",
 				Properties: map[string]mcp.Schema{
@@ -511,6 +512,9 @@ func (r *Registry) runKnowledgeTool(connID, name string, args map[string]interfa
 		}
 		out, err := r.RunTask(connID, strArg(args, "api"), strArg(args, "task"), interfaceMapArg(args, "params"), strArg(args, "target"), mode)
 		if err != nil {
+			if strings.TrimSpace(out) != "" {
+				return errResult(fmt.Errorf("%w\n\n%s", err, strings.TrimSpace(out)))
+			}
 			return errResult(err)
 		}
 		return okResult(out)

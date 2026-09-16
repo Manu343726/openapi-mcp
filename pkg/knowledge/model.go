@@ -9,6 +9,7 @@
 package knowledge
 
 import (
+	"encoding/json"
 	"fmt"
 	"path"
 	"regexp"
@@ -160,9 +161,46 @@ type Step struct {
 
 // InputBinding describes where the value for a tool argument comes from:
 // "param.<name>" (a task parameter) or "step.<N>.<jsonpath>" (output of a
-// previous step). A plain value is used verbatim.
+// previous step). A plain value is used verbatim as a literal.
 type InputBinding struct {
 	From string `yaml:"from"`
+}
+
+// UnmarshalYAML accepts either a mapping {"from": "..."} or a bare scalar. A
+// bare scalar (or a non-string "from" value) is materialized as a typed
+// literal: strings pass through verbatim, numbers/booleans keep their JSON
+// encoding so the resolver can recover the original type.
+func (b *InputBinding) UnmarshalYAML(value *yaml.Node) error {
+	var raw interface{}
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	switch t := raw.(type) {
+	case map[string]interface{}:
+		v, ok := t["from"]
+		if !ok {
+			return fmt.Errorf("input binding must provide a string \"from\" field, got %v", raw)
+		}
+		b.From = bindingValueText(v)
+	case nil:
+		return nil
+	default:
+		b.From = bindingValueText(raw)
+	}
+	return nil
+}
+
+// bindingValueText renders a bound/literal value as the "from" text: strings
+// pass through verbatim; other scalars use their JSON encoding.
+func bindingValueText(v interface{}) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	buf, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprint(v)
+	}
+	return string(buf)
 }
 
 // Rel is a typed relationship from this document to another one.

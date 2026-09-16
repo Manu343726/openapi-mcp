@@ -71,6 +71,10 @@ type apiEntry struct {
 	// has no usable timestamp (e.g. an inline spec). It lets callers detect that
 	// the loaded tools are stale relative to the source.
 	SpecTimestamp time.Time
+	// SpecETag is the ETag of the spec *source* (http(s) URLs only) at load
+	// time. It is the fallback freshness signal when the source has no usable
+	// Last-Modified timestamp.
+	SpecETag string
 	ToolSet       *mcp.ToolSet // tools keyed by bare operation names
 	Doc           *mcp.ApiDoc  // normalized spec documentation for introspection
 
@@ -909,10 +913,24 @@ func (r *Registry) loadToolSet(def config.APIDefinition) (*mcp.ToolSet, *mcp.Api
 // usable timestamp (inline spec, or probe failure). Zero is treated as
 // "unknown"/untracked everywhere downstream.
 func specTimestampFor(def config.APIDefinition) time.Time {
+	mod, _ := specSourceInfoFor(def)
+	return mod
+}
+
+// specSourceInfoFor returns the recorded source freshness (last-modified time
+// and ETag) for a spec, or the zero time / empty string when the source has no
+// usable signal.
+func specSourceInfoFor(def config.APIDefinition) (time.Time, string) {
 	if def.Source == "" {
-		return time.Time{}
+		return time.Time{}, ""
 	}
-	return parser.SpecSourceModified(def.Source)
+	return parser.SpecSourceInfo(def.Source)
+}
+
+// specETagFor returns the ETag recorded for a spec source at load time.
+func specETagFor(def config.APIDefinition) string {
+	_, etag := specSourceInfoFor(def)
+	return etag
 }
 
 func (r *Registry) newEntry(def config.APIDefinition) (*apiEntry, error) {
@@ -935,6 +953,7 @@ func (r *Registry) newEntry(def config.APIDefinition) (*apiEntry, error) {
 		SpecVersion:   version,
 		RegisteredAt:  time.Now().UTC(),
 		SpecTimestamp: specTimestampFor(def),
+		SpecETag:      specETagFor(def),
 		ToolSet:       toolSet,
 		Doc:           doc,
 		OpTags:        opTagsFromDoc(doc),
@@ -1280,9 +1299,9 @@ const (
 )
 
 // CheckSpecState reports the freshness of an API's loaded spec: the timestamp
-// recorded when the spec was loaded, the current source last-modified time, and
-// a status ("up-to-date", "outdated" or "unknown"). Errors when the API is not
-// registered.
+// and ETag recorded when the spec was loaded, the current source last-modified
+// time / ETag, and a status ("up-to-date", "outdated" or "unknown"). Errors
+// when the API is not registered.
 func (r *Registry) CheckSpecState(apiName string) (loadedAt, current time.Time, status string, err error) {
 	apiName = strings.TrimSpace(apiName)
 	r.mu.RLock()
@@ -1292,8 +1311,21 @@ func (r *Registry) CheckSpecState(apiName string) (loadedAt, current time.Time, 
 		return time.Time{}, time.Time{}, "", fmt.Errorf("API %q is not registered", apiName)
 	}
 	loadedAt = entry.SpecTimestamp
-	current = parser.SpecSourceModified(entry.Def.Source)
-	return loadedAt, current, specStatus(loadedAt, current), nil
+	loadedETag := entry.SpecETag
+	current, currentETag := parser.SpecSourceInfo(entry.Def.Source)
+	status = specStatus(loadedAt, current)
+	if status == SpecStatusUnknown {
+		// No usable timestamps: fall back to ETag comparison when the source
+		// and the load both carry one.
+		if loadedETag != "" && currentETag != "" {
+			if loadedETag == currentETag {
+				status = SpecStatusUpToDate
+			} else {
+				status = SpecStatusOutdated
+			}
+		}
+	}
+	return loadedAt, current, status, nil
 }
 
 // specStatus derives a freshness status from a pair of timestamps.

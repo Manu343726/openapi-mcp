@@ -144,7 +144,7 @@ func (r *Registry) RunTask(connID, apiName, task string, params map[string]inter
 		executedTools = append(executedTools, tool)
 		inputs, err := resolveStepInputs(step.Inputs, params, stepOutputs, i, capOptionalParams(cap))
 		if err != nil {
-			return "", fmt.Errorf("step %d (%s): %w", i+1, tool, err)
+			return strings.TrimSpace(exec.String()), fmt.Errorf("step %d (%s): %w", i+1, tool, err)
 		}
 		if target != "" {
 			inputs[targetArgName] = target
@@ -153,7 +153,7 @@ func (r *Registry) RunTask(connID, apiName, task string, params map[string]inter
 		if sref, isScript := r.scriptToolFor(tool); isScript {
 			text, execErr := r.RunScript(connID, tool, inputs)
 			if execErr != nil {
-				return "", fmt.Errorf("step %d (%s) failed: %w (partial progress above)", i+1, tool, execErr)
+				return strings.TrimSpace(exec.String()), fmt.Errorf("step %d (%s) failed: %w (partial progress captured above)", i+1, tool, execErr)
 			}
 			r.RecordTrace(connID, sref.scope, tool, inputs)
 			fmt.Fprintf(&exec, "[%d] %s -> script\n", i+1, tool)
@@ -173,7 +173,7 @@ func (r *Registry) RunTask(connID, apiName, task string, params map[string]inter
 		}
 		httpResp, execErr := executeRegisteredTool(r, connID, &ToolCallParams{ToolName: tool, Input: inputs})
 		if execErr != nil {
-			return "", fmt.Errorf("step %d (%s) failed: %w (partial progress above)", i+1, tool, execErr)
+			return strings.TrimSpace(exec.String()), fmt.Errorf("step %d (%s) failed: %w (partial progress captured above)", i+1, tool, execErr)
 		}
 		if _, _, ok := r.ResolveTool(tool); ok {
 			r.RecordTrace(connID, apiName, tool, inputs)
@@ -185,7 +185,7 @@ func (r *Registry) RunTask(connID, apiName, task string, params map[string]inter
 			fmt.Fprintf(&exec, "    response: %s\n", truncate(string(body), 400))
 		}
 		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-			return "", fmt.Errorf("step %d (%s) returned HTTP %d (partial progress above)", i+1, tool, httpResp.StatusCode)
+			return strings.TrimSpace(exec.String()), fmt.Errorf("step %d (%s) returned HTTP %d (partial progress captured above)", i+1, tool, httpResp.StatusCode)
 		}
 		if len(step.Outputs) > 0 {
 			stepOutputs[i] = map[string]string{}
@@ -300,10 +300,21 @@ func resolveStepInputs(bindings map[string]knowledge.InputBinding, params map[st
 			}
 		default:
 			// Literal value.
-			out[key] = from
+			out[key] = literalValue(from)
 		}
 	}
 	return out, nil
+}
+
+// literalValue decodes a literal input binding: JSON-encoded values (as
+// produced by scalar InputBinding or materialized recorded arguments) recover
+// their native type; plain text is used verbatim as a string.
+func literalValue(from string) interface{} {
+	var v interface{}
+	if err := json.Unmarshal([]byte(from), &v); err == nil {
+		return v
+	}
+	return from
 }
 
 // KnowledgeReview records an execution outcome against a capability document:

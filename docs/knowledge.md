@@ -154,12 +154,49 @@ related:
 - Consultar el perfil en [listAccessProfiles](elements/endpoints/get-access-profiles.md)
 ```
 
-- `kind` ∈ {index, glossary, endpoint, schema, field, capability}.
+- `kind` ∈ {index, glossary, endpoint, schema, field, capability, view, dashboard} + `scripts/`.
 - Stable IDs = file slug; relative links; link resolution at indexing time with **broken-link
   detection** (warning).
 - Language per API and per doc (`language`); warn on mismatch.
 - Element docs **anchor** to the spec by operationId/schema name (without modifying it); the anchor
   is validated against `ToolSet.Operations`/schemas.
+- Literal step inputs can be written as **bare scalars** (`qty: 7`, `note: hello`) or as JSON-encoded
+  bindings (`{from: '{"a":1}'}`, `{from: '"7"'}`); numbers/booleans/objects keep their type, and a
+  JSON-quoted string (`{from: '"7"'}`) stays a string.
+
+### Views and dashboards (`kind: view` / `kind: dashboard`)
+
+A `view`/`dashboard` doc renders the output of a backing call (tool, capability or script) in the
+web UI. The machine-relevant data lives in a dedicated `view:` block in the front-matter (not in the
+body and not under other keys — a doc without a `view:` block is rejected as "not a view/dashboard"):
+
+```markdown
+---
+id: user_card
+kind: view
+api: acme
+language: en
+view:
+  source: acme__get_user_by_name            # tool/capability/script feeding the view
+  layout: cards                             # table | list | cards | chart
+  auto_show: true                           # show automatically when Source completes
+  inputs:
+    - {name: username, label: Username, type: text, required: true, binding: param.username}
+    - {name: page, label: Page, type: number, default: "1", binding: param.page}
+    - {name: sort, label: Sort, type: select, options: [time, user], binding: param.sort}
+---
+# User card
+
+Human prose describing what this view shows.
+```
+
+- `view.source` — full MCP tool name (`<api>__<op>`), capability id or script id that produces the
+  payload. `binding: param.<name>` inputs forward the control value to that backing call; `default`
+  is pre-filled when the control is left empty, and `required` controls validation.
+- Rendered through the `view` MCP tool (`view {api, view_id, inputs}`), which resolves the source
+  call, fills the resolved inputs (defaults + provided values) and returns a structured screen-ready
+  render (layout, columns, rows, resolved inputs). Because inputs bound to `param.<name>` are
+  forwarded to the backing call, changing a control re-invokes the source through the same bridge.
 
 ## 4. In-session knowledge (per-connection overlay)
 
@@ -169,11 +206,13 @@ related:
 - Capture tools:
   - `knowledge_upsert {persist: false}` → overlay; `persist: true` → KB + git commit.
   - `knowledge_remember_sequence {api, name?}` → capability draft from the
-    `tools/call` observed in this session (steps + induced bindings). With
-    `learning.enabled` the draft is also **persisted** under `_suggestions/`
-    (survives restarts and git sync); `knowledge_suggestions` lists drafts and
-    `knowledge_promote {confirm: true}` promotes one into `capabilities/`
-    (explicit confirmation only).
+    `tools/call` observed in this session; recorded **arguments become literal
+    step inputs** so the draft replays each call faithfully (no synthetic
+    parameters). With `learning.enabled` the draft is also **persisted** under
+    `_suggestions/` (survives restarts and git sync); `knowledge_suggestions`
+    lists drafts and `knowledge_promote {confirm: true}` promotes one into
+    `capabilities/` (explicit confirmation only); `knowledge_promote_script`
+    generates a replayable `scripts/` tool from the draft.
   - `knowledge_clarify {api, intent}` → gaps: terms with no glossary entry,
     undocumented endpoints, parameters with no meaning.
 

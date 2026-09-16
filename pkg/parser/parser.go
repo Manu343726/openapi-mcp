@@ -166,6 +166,50 @@ func LoadSwagger(location string) (interface{}, string, error) {
 	}
 }
 
+// SpecSourceETag returns the ETag of an http(s) spec *source*, probed via a
+// cheap HEAD request (empty for file sources or when the server omits ETag).
+// It lets freshness checks compare tags when no Last-Modified header exists.
+func SpecSourceETag(location string) string {
+	_, etag := SpecSourceInfo(location)
+	return etag
+}
+
+// SpecSourceInfo combines SpecSourceModified with an ETag probe in a single
+// HEAD request for http(s) sources. Local paths only yield a modification time.
+func SpecSourceInfo(location string) (time.Time, string) {
+	if location == "" {
+		return time.Time{}, ""
+	}
+	locURL, err := url.ParseRequestURI(location)
+	isURL := err == nil && locURL != nil && (locURL.Scheme == "http" || locURL.Scheme == "https")
+	if !isURL {
+		absPath, err := filepath.Abs(location)
+		if err != nil {
+			return time.Time{}, ""
+		}
+		st, err := os.Stat(absPath)
+		if err != nil {
+			return time.Time{}, ""
+		}
+		return st.ModTime(), ""
+	}
+	// HTTP(S) sources: perform a lightweight HEAD to read Last-Modified and
+	// ETag without downloading the whole spec.
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Head(location)
+	if err != nil {
+		return time.Time{}, ""
+	}
+	defer resp.Body.Close()
+	var mod time.Time
+	if lm := resp.Header.Get("Last-Modified"); lm != "" {
+		if t, err := http.ParseTime(lm); err == nil {
+			mod = t
+		}
+	}
+	return mod, resp.Header.Get("ETag")
+}
+
 // SpecSourceModified returns the last-modified time of an OpenAPI spec *source*:
 // the file modification time for local paths, or the Last-Modified response header
 // for http(s) URLs (probed via a cheap HEAD request). It returns a zero time.Time
@@ -175,36 +219,8 @@ func LoadSwagger(location string) (interface{}, string, error) {
 // It is used to track when a spec was last loaded so the MCP server can warn that
 // the in-memory toolset is stale relative to the source on disk/URL.
 func SpecSourceModified(location string) time.Time {
-	if location == "" {
-		return time.Time{}
-	}
-	locURL, err := url.ParseRequestURI(location)
-	isURL := err == nil && locURL != nil && (locURL.Scheme == "http" || locURL.Scheme == "https")
-	if !isURL {
-		absPath, err := filepath.Abs(location)
-		if err != nil {
-			return time.Time{}
-		}
-		st, err := os.Stat(absPath)
-		if err != nil {
-			return time.Time{}
-		}
-		return st.ModTime()
-	}
-	// HTTP(S) sources: perform a lightweight HEAD to read Last-Modified without
-	// downloading the whole spec.
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Head(location)
-	if err != nil {
-		return time.Time{}
-	}
-	defer resp.Body.Close()
-	if lm := resp.Header.Get("Last-Modified"); lm != "" {
-		if t, err := http.ParseTime(lm); err == nil {
-			return t
-		}
-	}
-	return time.Time{}
+	mod, _ := SpecSourceInfo(location)
+	return mod
 }
 
 // LoadSwaggerFromBytes detects the version and loads an OpenAPI/Swagger
