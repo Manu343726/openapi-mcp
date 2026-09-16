@@ -7,6 +7,11 @@ ARG TARGETARCH
 
 WORKDIR /app
 
+# The embedded web UI is a generated bundle that must exist before the Go build.
+# Install the Node toolchain in the builder image so the UI can be compiled here
+# instead of depending on a host with Node preinstalled.
+RUN apk add --no-cache nodejs npm
+
 # Copy Go modules and download dependencies first
 # This layer is cached unless go.mod or go.sum changes
 COPY go.mod go.sum ./
@@ -14,6 +19,9 @@ RUN go mod download
 
 # Copy the rest of the application source code
 COPY . .
+
+# Generate the bundled web UI required by webui/embed.go before compiling the binary.
+RUN cd webui && npm ci --no-audit --no-fund && npm run build
 
 # Build the static binary for the command-line tool
 # CGO_ENABLED=0 produces a static binary, important for distroless/scratch images
