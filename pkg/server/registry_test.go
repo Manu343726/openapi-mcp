@@ -57,7 +57,7 @@ func TestRegisterAndUnregisterAPI(t *testing.T) {
 	reg := NewRegistry("")
 	ts := parsedTestToolSet("getCurrent", "postForecast")
 
-	summary, err := reg.registerParsedAPI(config.APIDefinition{Name: "weather"}, ts, "v3", false)
+	summary, err := reg.registerParsedAPI(exposedAPI(config.APIDefinition{Name: "weather"}), ts, "v3", false)
 	require.NoError(t, err)
 	require.NotNil(t, summary)
 	assert.Equal(t, "weather", summary.Name)
@@ -70,9 +70,9 @@ func TestRegisterAndUnregisterAPI(t *testing.T) {
 	assert.Contains(t, names, "weather__getCurrent")
 
 	// Duplicate registration fails unless replace is set.
-	_, err = reg.registerParsedAPI(config.APIDefinition{Name: "weather"}, ts, "v3", false)
+	_, err = reg.registerParsedAPI(exposedAPI(config.APIDefinition{Name: "weather"}), ts, "v3", false)
 	assert.ErrorContains(t, err, "already registered")
-	_, err = reg.registerParsedAPI(config.APIDefinition{Name: "weather"}, ts, "v3", true)
+	_, err = reg.registerParsedAPI(exposedAPI(config.APIDefinition{Name: "weather"}), ts, "v3", true)
 	assert.NoError(t, err)
 
 	// Unregister removes the API and its tools.
@@ -89,14 +89,14 @@ func TestRegisterAndUnregisterAPI(t *testing.T) {
 func TestToolNameCollisionRejected(t *testing.T) {
 	reg := NewRegistry("")
 	// A bare (unprefixed) tool colliding with a management tool must be rejected.
-	_, err := reg.registerParsedAPI(config.APIDefinition{}, parsedTestToolSet("getA", ToolRegisterAPI), "v3", false)
+	_, err := reg.registerParsedAPI(exposedAPI(config.APIDefinition{}), parsedTestToolSet("getA", ToolRegisterAPI), "v3", false)
 	assert.ErrorContains(t, err, "collision")
 }
 
 func TestListAPIsSorted(t *testing.T) {
 	reg := NewRegistry("")
-	reg.registerParsedAPI(config.APIDefinition{Name: "zeta"}, parsedTestToolSet("op"), "v3", false)
-	reg.registerParsedAPI(config.APIDefinition{Name: "alpha"}, parsedTestToolSet("op"), "v3", false)
+	reg.registerParsedAPI(exposedAPI(config.APIDefinition{Name: "zeta"}), parsedTestToolSet("op"), "v3", false)
+	reg.registerParsedAPI(exposedAPI(config.APIDefinition{Name: "alpha"}), parsedTestToolSet("op"), "v3", false)
 	apis := reg.APIs()
 	require.Len(t, apis, 2)
 	assert.Equal(t, "alpha", apis[0].Name)
@@ -105,7 +105,7 @@ func TestListAPIsSorted(t *testing.T) {
 
 func TestManagementToolsAlwaysExposed(t *testing.T) {
 	reg := NewRegistry("")
-	reg.registerParsedAPI(config.APIDefinition{Name: "weather"}, parsedTestToolSet("getCurrent"), "v3", false)
+	reg.registerParsedAPI(exposedAPI(config.APIDefinition{Name: "weather"}), parsedTestToolSet("getCurrent"), "v3", false)
 	names := toolNames(reg.Tools())
 	assert.Contains(t, names, ToolRegisterAPI)
 	assert.Contains(t, names, ToolListAPIs)
@@ -136,18 +136,18 @@ func TestManagementToolsExposedWhenEmpty(t *testing.T) {
 
 func TestSingleTargetAutoActive(t *testing.T) {
 	reg := NewRegistry("")
-	summary, err := reg.RegisterAPI(config.APIDefinition{
+	summary, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name:    "weather",
 		Spec:    registryTestV3Spec,
 		Targets: []config.TargetDefinition{{Name: "prod", BaseURL: "https://prod.example.com"}},
-	}, false)
+	}), false)
 	require.NoError(t, err)
 	assert.Equal(t, "prod", summary.ActiveTarget)
 }
 
 func TestTargetLifecycle(t *testing.T) {
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{Name: "weather", Spec: registryTestV3Spec}, false)
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "weather", Spec: registryTestV3Spec}), false)
 
 	// Register the first target -> becomes active automatically.
 	s, err := reg.AddTarget("weather", config.TargetDefinition{Name: "prod", BaseURL: "https://prod.example.com"}, false)
@@ -188,7 +188,7 @@ func TestTargetLifecycle(t *testing.T) {
 
 func TestToolTargetPropertyInjection(t *testing.T) {
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{Name: "weather", Spec: registryTestV3Spec}, false)
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "weather", Spec: registryTestV3Spec}), false)
 	reg.AddTarget("weather", config.TargetDefinition{Name: "prod", BaseURL: "https://prod.example.com"}, false)
 
 	// With an active target set, 'target' is present but not required.
@@ -210,7 +210,7 @@ func TestToolTargetPropertyInjection(t *testing.T) {
 
 func TestPrepareCallArgs(t *testing.T) {
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{Name: "weather", Spec: registryTestV3Spec}, false)
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "weather", Spec: registryTestV3Spec}), false)
 	reg.AddTarget("weather", config.TargetDefinition{Name: "prod", BaseURL: "https://prod.example.com", APIKey: "secret"}, false)
 	reg.AddTarget("weather", config.TargetDefinition{Name: "staging", BaseURL: "https://staging.example.com"}, false)
 
@@ -242,7 +242,7 @@ func TestPrepareCallArgs(t *testing.T) {
 
 	// API without any target -> guidance error.
 	reg2 := NewRegistry("")
-	reg2.RegisterAPI(config.APIDefinition{Name: "bare", Spec: registryTestV3Spec}, false)
+	reg2.RegisterAPI(exposedAPI(config.APIDefinition{Name: "bare", Spec: registryTestV3Spec}), false)
 	api2, _, _ := reg2.ResolveTool("bare__getCurrent")
 	_, _, _, err = reg2.prepareCallArgs(api2, map[string]interface{}{})
 	assert.ErrorContains(t, err, "no registered targets")
@@ -253,7 +253,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	path := filepath.Join(dir, "config.json")
 
 	reg := NewRegistry(path)
-	_, err := reg.RegisterAPI(config.APIDefinition{
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name:         "weather",
 		Spec:         registryTestV3Spec,
 		ActiveTarget: "prod",
@@ -262,7 +262,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 			{Name: "prod", BaseURL: "https://prod.example.com", APIKeyEnv: "WEATHER_KEY"},
 			{Name: "staging", BaseURL: "https://staging.example.com"},
 		},
-	}, false)
+	}), false)
 	require.NoError(t, err)
 
 	fc, err := config.LoadFile(path)
@@ -297,7 +297,7 @@ func TestRuntimeRegisterPersistsAndBroadcasts(t *testing.T) {
 	connMutex.Unlock()
 	defer cleanupTestConnection(connID)
 
-	summary, err := reg.RegisterAPI(config.APIDefinition{Name: "weather", Spec: registryTestV3Spec, Targets: []config.TargetDefinition{{Name: "default", BaseURL: "https://api.example.com"}}}, false)
+	summary, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "weather", Spec: registryTestV3Spec, Targets: []config.TargetDefinition{{Name: "default", BaseURL: "https://api.example.com"}}}), false)
 	require.NoError(t, err)
 	assert.Equal(t, "weather", summary.Name)
 
@@ -345,7 +345,7 @@ func TestManagementToolsJSON(t *testing.T) {
 
 func TestAPISummaryJSON(t *testing.T) {
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{Name: "weather", Spec: registryTestV3Spec}, false)
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "weather", Spec: registryTestV3Spec}), false)
 	body, err := json.MarshalIndent(reg.APIs(), "", "  ")
 	require.NoError(t, err)
 	assert.NotContains(t, string(body), "api_key") // credentials never leak into summaries
@@ -353,18 +353,18 @@ func TestAPISummaryJSON(t *testing.T) {
 
 func TestNormalizeRejectsInvalidAuth(t *testing.T) {
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "bad",
 		Spec: registryTestV3Spec,
 		Auth: config.AuthConfig{Type: config.AuthAPIKey, In: "nowhere", Name: "k"},
-	}, false)
+	}), false)
 	assert.ErrorContains(t, err, "invalid auth.in")
 
-	_, err = reg.RegisterAPI(config.APIDefinition{
+	_, err = reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "bad2",
 		Spec: registryTestV3Spec,
 		Auth: config.AuthConfig{Type: "bogus"},
-	}, false)
+	}), false)
 	assert.ErrorContains(t, err, "invalid auth.type")
 }
 
@@ -372,7 +372,7 @@ func TestPersistenceFailureLeavesStateUntouched(t *testing.T) {
 	// Persist failures must surface loudly rather than silently losing
 	// registrations; the in-memory registry is left unchanged.
 	reg := NewRegistry(filepath.Join(t.TempDir(), "no", "such", "dir", "cfg.json"))
-	_, err := reg.RegisterAPI(config.APIDefinition{Name: "weather", Spec: registryTestV3Spec}, false)
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "weather", Spec: registryTestV3Spec}), false)
 	assert.Error(t, err)
 	assert.Empty(t, reg.APIs())
 }
@@ -413,17 +413,28 @@ const billingSpec = `{
 func registerSpecWithTargets(t *testing.T, name, spec string, targets ...config.TargetDefinition) *Registry {
 	t.Helper()
 	reg := NewRegistry("")
-	def := config.APIDefinition{Name: name, Spec: spec, Targets: targets}
+	def := exposedAPI(config.APIDefinition{Name: name, Spec: spec, Targets: targets})
 	_, err := reg.RegisterAPI(def, false)
 	require.NoError(t, err)
 	return reg
 }
 
+// exposedAPI returns def with an explicit mode: all exposure unless the caller
+// already configured one, so tests exercising an API's tools see them even
+// though the production default is mode: none. Tests asserting the default
+// exposure behavior register without it.
+func exposedAPI(def config.APIDefinition) config.APIDefinition {
+	if def.Exposure.IsZero() {
+		def.Exposure = config.ExposureConfig{Mode: config.ExposureModeAll}
+	}
+	return def
+}
+
 func TestMultipleAPIsIndependentNamespaces(t *testing.T) {
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{Name: "catalog", Spec: catalogSpec}, false)
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "catalog", Spec: catalogSpec}), false)
 	require.NoError(t, err)
-	_, err = reg.RegisterAPI(config.APIDefinition{Name: "billing", Spec: billingSpec}, false)
+	_, err = reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "billing", Spec: billingSpec}), false)
 	require.NoError(t, err)
 
 	names := toolNames(reg.Tools())
@@ -477,14 +488,14 @@ func TestActiveTargetSelectionAndRouting(t *testing.T) {
 	reg := NewRegistry(p)
 
 	// Register an API with two targets.
-	_, err := reg.RegisterAPI(config.APIDefinition{
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "catalog",
 		Spec: catalogSpec,
 		Targets: []config.TargetDefinition{
 			{Name: "prod", BaseURL: "https://prod.catalog.example.com"},
 			{Name: "stage", BaseURL: "https://stage.catalog.example.com", APIKey: "stage-key"},
 		},
-	}, false)
+	}), false)
 	require.NoError(t, err)
 
 	api, _, _ := reg.ResolveTool("catalog__listItems")
@@ -533,11 +544,11 @@ func TestTargetPersistenceAcrossMutations(t *testing.T) {
 
 	// Start with one target; add, replace, remove, and switch active across the
 	// file, verifying each mutation is reflected on disk.
-	_, err := reg.RegisterAPI(config.APIDefinition{
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name:    "catalog",
 		Spec:    catalogSpec,
 		Targets: []config.TargetDefinition{{Name: "prod", BaseURL: "https://prod.example.com"}},
-	}, false)
+	}), false)
 	require.NoError(t, err)
 
 	assertPersisted := func(want []string, wantActive string) {
@@ -600,7 +611,7 @@ func TestActiveTargetRejectedForUnknownValues(t *testing.T) {
 func TestReloadRegistryFromFileRestoresTargets(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "cfg.json")
 	reg := NewRegistry(p)
-	_, err := reg.RegisterAPI(config.APIDefinition{
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name:         "catalog",
 		Spec:         catalogSpec,
 		ActiveTarget: "stage",
@@ -609,7 +620,7 @@ func TestReloadRegistryFromFileRestoresTargets(t *testing.T) {
 			{Name: "prod", BaseURL: "https://prod.example.com"},
 			{Name: "stage", BaseURL: "https://stage.example.com", APIKey: "stage-key"},
 		},
-	}, false)
+	}), false)
 	require.NoError(t, err)
 
 	// Simulate a restart: build a fresh registry that loads the same file.
@@ -647,15 +658,15 @@ func TestReloadRegistryFromFileRestoresTargets(t *testing.T) {
 
 func TestUpdatePreservesTargets(t *testing.T) {
 	reg := NewRegistry("")
-	def := config.APIDefinition{
+	def := exposedAPI(config.APIDefinition{
 		Name: "api", Spec: registryTestV3Spec,
 		Targets: []config.TargetDefinition{{Name: "prod", BaseURL: "https://prod.example.com"}},
-	}
+	})
 	_, err := reg.RegisterAPI(def, false)
 	require.NoError(t, err)
 
 	// Re-register (update) with the same spec but NO targets: targets must survive.
-	_, err = reg.RegisterAPI(config.APIDefinition{Name: "api", Spec: registryTestV3Spec}, true)
+	_, err = reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "api", Spec: registryTestV3Spec}), true)
 	require.NoError(t, err)
 
 	sum, ok := reg.GetAPI("api")
@@ -663,10 +674,10 @@ func TestUpdatePreservesTargets(t *testing.T) {
 	assert.ElementsMatch(t, []string{"prod"}, sum.Targets)
 
 	// Update supplying a new target merges (does not drop the old one).
-	_, err = reg.RegisterAPI(config.APIDefinition{
+	_, err = reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "api", Spec: registryTestV3Spec,
 		Targets: []config.TargetDefinition{{Name: "stage", BaseURL: "https://stage.example.com"}},
-	}, true)
+	}), true)
 	require.NoError(t, err)
 	sum, _ = reg.GetAPI("api")
 	assert.ElementsMatch(t, []string{"prod", "stage"}, sum.Targets)
@@ -674,11 +685,11 @@ func TestUpdatePreservesTargets(t *testing.T) {
 
 func TestRelogin(t *testing.T) {
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "api", Spec: registryTestV3Spec,
 		Auth:    config.AuthConfig{Type: config.AuthCustomLogin},
 		Targets: []config.TargetDefinition{{Name: "local", BaseURL: "https://x", LoginUsername: "u", LoginPassword: "p"}},
-	}, false)
+	}), false)
 	require.NoError(t, reg.Relogin("api", "local"))
 	// Relogin on unknown target/API errors.
 	assert.Error(t, reg.Relogin("api", "nope"))
@@ -688,7 +699,7 @@ func TestRelogin(t *testing.T) {
 func TestReloadFromConfig(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "config.yaml")
 	reg := NewRegistry(p)
-	_, err := reg.RegisterAPI(config.APIDefinition{Name: "a", Spec: registryTestV3Spec}, false)
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "a", Spec: registryTestV3Spec}), false)
 	require.NoError(t, err)
 
 	// Rewrite config with an extra API + changed target; reload applies.
@@ -713,14 +724,14 @@ func TestReloadFromConfig(t *testing.T) {
 
 func TestSessionActiveTarget(t *testing.T) {
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "api", Spec: registryTestV3Spec,
 		ActiveTarget: "prod", // global active
 		Targets: []config.TargetDefinition{
 			{Name: "prod", BaseURL: "https://prod"},
 			{Name: "stage", BaseURL: "https://stage"},
 		},
-	}, true)
+	}), true)
 
 	api, _, _ := reg.ResolveTool("api__getCurrent")
 	require.NoError(t, reg.SetSessionActiveTarget("sessA", "api", "stage"))
@@ -756,7 +767,7 @@ func TestSpecTimestampTrackedAndFresh(t *testing.T) {
 	require.NoError(t, os.Chtimes(path, loaded, loaded))
 
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{Name: "weather", Source: path, Targets: []config.TargetDefinition{{Name: "prod", BaseURL: "https://api"}}}, false)
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "weather", Source: path, Targets: []config.TargetDefinition{{Name: "prod", BaseURL: "https://api"}}}), false)
 	require.NoError(t, err)
 
 	// The summary carries the recorded source timestamp.
@@ -775,7 +786,7 @@ func TestSpecTimestampTrackedAndFresh(t *testing.T) {
 func TestCheckSpecStateOutdatedAndReload(t *testing.T) {
 	path := writeSpecFile(t, "spec.json", registryTestV3Spec)
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{Name: "weather", Source: path, Targets: []config.TargetDefinition{{Name: "prod", BaseURL: "https://api"}}}, false)
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "weather", Source: path, Targets: []config.TargetDefinition{{Name: "prod", BaseURL: "https://api"}}}), false)
 	require.NoError(t, err)
 
 	assert.Contains(t, toolNames(reg.Tools()), "weather__getCurrent")
@@ -824,7 +835,7 @@ func TestCheckSpecStateOutdatedAndReload(t *testing.T) {
 func TestReloadAPIUnknownAndErrors(t *testing.T) {
 	// Inline specs carry no source timestamp -> unknown status.
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{Name: "inline", Spec: registryTestV3Spec}, false)
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "inline", Spec: registryTestV3Spec}), false)
 	require.NoError(t, err)
 	res, err := reg.ReloadAPI("inline")
 	require.NoError(t, err)
@@ -840,7 +851,7 @@ func TestReloadAPIUnknownAndErrors(t *testing.T) {
 func TestReloadAPIManagementTool(t *testing.T) {
 	path := writeSpecFile(t, "spec.json", registryTestV3Spec)
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{Name: "weather", Source: path}, false)
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "weather", Source: path}), false)
 	require.NoError(t, err)
 
 	// check_api_spec on an unchanged source reports up-to-date.
@@ -871,7 +882,7 @@ func TestCheckSpecStateETagFallback(t *testing.T) {
 	defer srv.Close()
 
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{Name: "taggy", Source: srv.URL}, false)
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "taggy", Source: srv.URL}), false)
 	require.NoError(t, err)
 
 	// No Last-Modified anywhere, so timestamps are never usable; the status
@@ -920,11 +931,11 @@ func TestKnowledgeOverlaySession(t *testing.T) {
 
 	// Register a minimal API with knowledge enabled.
 	root := t.TempDir()
-	def := config.APIDefinition{
+	def := exposedAPI(config.APIDefinition{
 		Name:      "acme",
 		Source:    "/tmp/opencode/acme-spec.json",
 		Knowledge: config.KnowledgeConfig{Enabled: true, Language: "es", Root: root},
-	}
+	})
 	// Spec source is bogus; registration must not be attempted here, so create
 	// the entry directly through the registry snapshot path instead:
 	reg.mu.Lock()
@@ -1056,7 +1067,7 @@ func TestMetaNameReserved(t *testing.T) {
 	require.NoError(t, validateAPIName("acme"))
 
 	// RegisterAPI refuses to create an API named "_meta".
-	_, err = reg.RegisterAPI(config.APIDefinition{Name: metaAPIName, Spec: "{}"}, false)
+	_, err = reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: metaAPIName, Spec: "{}"}), false)
 	assert.ErrorContains(t, err, "reserved")
 }
 
@@ -1073,14 +1084,14 @@ func TestViewToolRendersDashboard(t *testing.T) {
 	defer backend.Close()
 
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "acme",
 		Spec: `{"openapi":"3.0.0","info":{"title":"Acme","version":"1"},"paths":{"/users":{"get":{"operationId":"listUserActions","parameters":[{"name":"q","in":"query","schema":{"type":"string"}}],"responses":{"200":{"description":"OK"}}}}}}`,
 		Targets: []config.TargetDefinition{
 			{Name: "default", BaseURL: backend.URL},
 		},
 		Knowledge: config.KnowledgeConfig{Enabled: true, Language: "en", Root: t.TempDir()},
-	}, false)
+	}), false)
 	require.NoError(t, err)
 
 	// A dashboard persisted into the knowledge library (views/ directory).
@@ -1152,14 +1163,14 @@ func TestRunTaskAutoDisplaysBoundDashboard(t *testing.T) {
 	defer backend.Close()
 
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "acme",
 		Spec: `{"openapi":"3.0.0","info":{"title":"Acme","version":"1"},"paths":{"/users":{"get":{"operationId":"listUserActions","responses":{"200":{"description":"OK"}}}}}}`,
 		Targets: []config.TargetDefinition{
 			{Name: "default", BaseURL: backend.URL},
 		},
 		Knowledge: config.KnowledgeConfig{Enabled: true, Language: "en", Root: t.TempDir()},
-	}, false)
+	}), false)
 	require.NoError(t, err)
 
 	// Capability with one step that calls the source tool of the dashboard.

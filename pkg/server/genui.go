@@ -245,7 +245,7 @@ func (b *UIBridge) streamGenUIToolCall(ctx context.Context, writer *sse.SSEWrite
 		Content: []ToolResultContent{{Type: "text", Text: text}},
 		IsError: callErr != nil,
 	}
-	view := b.reg.viewParams(act.tool, payload)
+	view := b.reg.viewParams(connID, act.tool, payload)
 	enqueueView(connID, view)
 
 	result := events.NewToolCallResultEvent(uuid.NewString(), toolID, text)

@@ -22,8 +22,11 @@ const (
 	ToolUnregisterAPI = "unregister_openapi_api"
 	ToolListAPIs      = "list_openapi_apis"
 
-	// API introspection / documentation.
-	ToolDescribeAPI     = "describe_openapi_api"
+	// API introspection / documentation. Fine-grained by design: there is no
+	// single "dump the whole API" tool. Pull metadata, endpoints, schemas and
+	// single operations individually, each paginated where it can grow large.
+	ToolGetAPIInfo      = "get_api_info"
+	ToolListEndpoints   = "list_api_endpoints"
 	ToolGetOperation    = "get_api_operation"
 	ToolListSchemas     = "list_api_schemas"
 	ToolSearchOperation = "search_openapi_operations"
@@ -37,6 +40,7 @@ const (
 	ToolCheckSpec    = "check_api_spec"
 	ToolSetLogLevel  = "set_log_level"
 	ToolPreviewCall  = "preview_api_call"
+	ToolCallEndpoint = "call_api_endpoint"
 
 	// Target management.
 	ToolAddTarget          = "register_api_target"
@@ -54,6 +58,11 @@ const (
 	ToolUpdateSessionAPIExposure = "update_session_api_exposure"
 	ToolClearSessionAPIExposure  = "clear_session_api_exposure"
 	ToolAPIExposure              = "api_exposure"
+
+	// Ephemeral results store.
+	ToolResultsGet     = "results_get"
+	ToolResultsList    = "results_list"
+	ToolResultsCleanup = "results_cleanup"
 )
 
 // managementTools is the fixed set of management tools appended to every
@@ -83,8 +92,8 @@ func buildManagementTools() []mcp.Tool {
 		},
 		{
 			Name:        ToolListAPIs,
-			Description: "List every registered API, including its target names, active target and exposed tools.",
-			InputSchema: emptySchema(),
+			Description: "List every registered API and its configuration summary: source/title, spec version, exposure (active/mode/exposed tools), active target and target names. Compact by design (no per-API tool lists); pass include=[\"tools\"] to also get the full tool names per API (large for big specs - prefer list_api_endpoints / search_openapi_operations for exploring endpoints).",
+			InputSchema: listAPIsSchema(),
 		},
 		{
 			Name:        ToolAddTarget,
@@ -158,15 +167,21 @@ func buildManagementTools() []mcp.Tool {
 			},
 		},
 		{
-			Name:        ToolDescribeAPI,
-			Description: "Return the documentation of a registered API: info (title, version, description), servers, tags, endpoints (method/path/summary + MCP tool name), DTO schemas, auth + target config. Use `include` and `search` to limit the payload size, and `schema_detail` to control how much schema info is returned.",
+			Name:        ToolGetAPIInfo,
+			Description: "Return a registered API's description and configuration: info (title, version, description, servers, tags), auth config, targets, active target and config filters. Compact and fixed in size regardless of how large the API is. Use list_api_endpoints, list_api_schemas and get_api_operation for the individual components.",
+			InputSchema: nameOnlySchema("api", "Name of the registered API"),
+		},
+		{
+			Name:        ToolListEndpoints,
+			Description: "List a registered API's endpoints (operations) as a paginated index: each entry maps an operationId to its HTTP method, path, summary and MCP tool name (<api>__<op>). Optional substring `search` and `method` filters; paginated with limit/offset and a total/has_more/limit/offset block. For a single endpoint's parameters/request/response schemas call get_api_operation instead.",
 			InputSchema: mcp.Schema{
 				Type: "object",
 				Properties: map[string]mcp.Schema{
-					"api":           {Type: "string", Description: "Name of the registered API"},
-					"include":       stringListProp("Only include these sections: info, endpoints, schemas, auth, targets (default all)"),
-					"search":        {Type: "string", Description: "Filter endpoints by substring match on operationId/path/summary"},
-					"schema_detail": {Type: "string", Enum: []interface{}{"full", "compact"}, Description: "Schema detail level (default compact: names only; full: expanded)"},
+					"api":    {Type: "string", Description: "Name of the registered API"},
+					"search": {Type: "string", Description: "Filter endpoints by substring match on operationId/path/summary/tags"},
+					"method": {Type: "string", Enum: []interface{}{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}, Description: "Optional HTTP method filter"},
+					"limit":  {Type: "integer", Description: "Max endpoints to return (default 20)"},
+					"offset": {Type: "integer", Description: "Endpoints to skip for pagination (default 0)"},
 				},
 				Required: []string{"api"},
 			},
@@ -194,7 +209,7 @@ func buildManagementTools() []mcp.Tool {
 					"expand": {Type: "boolean", Description: "Expand each schema with its full property tree (default false: names + types only)"},
 					"name":   {Type: "string", Description: "Only return this specific schema by name (optional)"},
 					"search": {Type: "string", Description: "Filter schema names by substring match"},
-					"limit":  {Type: "integer", Description: "Max schemas to return (default 100)"},
+					"limit":  {Type: "integer", Description: "Max schemas to return (default 50)"},
 					"offset": {Type: "integer", Description: "Skipped schemas for pagination (default 0)"},
 				},
 				Required: []string{"api"},
@@ -202,13 +217,15 @@ func buildManagementTools() []mcp.Tool {
 		},
 		{
 			Name:        ToolSearchOperation,
-			Description: "Search a registered API's endpoints (operations) by keyword matching operationId, path or summary. Returns the matching operation + its MCP tool name so you can then call get_api_operation for details.",
+			Description: "Search a registered API's endpoints (operations) by keyword matching operationId, path or summary. Returns a page of matching operations + their MCP tool names (paginated with limit/offset and a total/has_more/limit/offset block) so you can then call get_api_operation for details.",
 			InputSchema: mcp.Schema{
 				Type: "object",
 				Properties: map[string]mcp.Schema{
 					"api":    {Type: "string", Description: "Name of the registered API"},
 					"query":  {Type: "string", Description: "Keyword to match against operationId, path or summary"},
 					"method": {Type: "string", Enum: []interface{}{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}, Description: "Optional HTTP method filter"},
+					"limit":  {Type: "integer", Description: "Max matches to return (default 20)"},
+					"offset": {Type: "integer", Description: "Matches to skip for pagination (default 0)"},
 				},
 				Required: []string{"api", "query"},
 			},
@@ -264,6 +281,26 @@ func buildManagementTools() []mcp.Tool {
 				Required: []string{"operation", "arguments"},
 			},
 		},
+		{
+			Name:        ToolCallEndpoint,
+			Description: "Call any registered API endpoint by API name + operationId (or full tool name <api>__<op>), with the operation arguments as a map. This single tool reaches every registered operation regardless of the API's exposure mode - per-operation tools may be hidden, this one is not. Target auth, argument serialization and login tokens work exactly as for the generated tool. Discover operations with get_api_operation / list_api_endpoints.",
+			InputSchema: callEndpointSchema(),
+		},
+		{
+			Name:        ToolResultsGet,
+			Description: "Retrieve the full content of an externally-stored result by its handle (returned by a tool whose output exceeded server.results.max_inline_bytes). Large tool outputs are stored out-of-line and referenced by a compact handle to keep token overhead low.",
+			InputSchema: nameOnlySchema("handle", "Result handle (e.g. 'r_<uuid>') as reported in the tool result that was externalized"),
+		},
+		{
+			Name:        ToolResultsList,
+			Description: "List the externally-stored results recorded for this session (handle, tool, kind, bytes, remaining TTL).",
+			InputSchema: emptySchema(),
+		},
+		{
+			Name:        ToolResultsCleanup,
+			Description: "Force a clean-up of the ephemeral results store, removing expired handles and reporting recovered count/bytes.",
+			InputSchema: emptySchema(),
+		},
 	}
 }
 
@@ -289,6 +326,31 @@ func apiAndTargetSchema() mcp.Schema {
 			"target": {Type: "string", Description: "Name of the target within that API"},
 		},
 		Required: []string{"api", "target"},
+	}
+}
+
+func listAPIsSchema() mcp.Schema {
+	return mcp.Schema{
+		Type: "object",
+		Properties: map[string]mcp.Schema{
+			"include": stringListProp(`[tools] includes the full per-API tool names (default: compact summary only; a big API's tool list is large - explore endpoints with list_api_endpoints instead)`),
+		},
+	}
+}
+
+func callEndpointSchema() mcp.Schema {
+	return mcp.Schema{
+		Type: "object",
+		Properties: map[string]mcp.Schema{
+			"api":       {Type: "string", Description: "Name of the registered API"},
+			"operation": {Type: "string", Description: "operationId or full tool name (<api>__<op>) to call"},
+			"arguments": mcp.Schema{
+				Type:        "object",
+				Description: "Arguments to the operation (map of param name to value, as with the generated tool; 'target' selects a specific target)",
+				Properties:  map[string]mcp.Schema{},
+			},
+		},
+		Required: []string{"api", "operation"},
 	}
 }
 
@@ -448,7 +510,12 @@ func boolProp(description string) mcp.Schema {
 }
 
 func intArg(args map[string]interface{}, key string, def int) int {
-	if v, ok := args[key].(float64); ok {
+	switch v := args[key].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case int64:
 		return int(v)
 	}
 	return def
@@ -580,10 +647,38 @@ func (r *Registry) runManagementTool(connID, name string, args map[string]interf
 		}
 	case ToolListAPIs:
 		summaries := r.APIsForSession(connID)
-		body, _ := json.MarshalIndent(summaries, "", "  ")
 		if len(summaries) == 0 {
 			return okResult("No APIs are registered. Use register_openapi_api to add one.")
 		}
+		includeTools := false
+		for _, inc := range strSliceArg(args, "include") {
+			if strings.EqualFold(inc, "tools") {
+				includeTools = true
+			}
+		}
+		rows := make([]map[string]interface{}, 0, len(summaries))
+		for _, s := range summaries {
+			row := map[string]interface{}{
+				"name":             s.Name,
+				"title":            s.Title,
+				"source":           s.Source,
+				"spec_version":     s.SpecVersion,
+				"spec_timestamp":   s.SpecTimestamp,
+				"registered_at":    s.RegisteredAt,
+				"tool_count":       s.ToolCount,
+				"exposed_tools":    s.ExposedTools,
+				"active":           s.Active,
+				"mode":             s.Mode,
+				"session_override": s.SessionOverride,
+				"active_target":    s.ActiveTarget,
+				"targets":          s.Targets,
+			}
+			if includeTools {
+				row["tools"] = s.Tools
+			}
+			rows = append(rows, row)
+		}
+		body, _ := json.MarshalIndent(rows, "", "  ")
 		return okResult(string(body))
 	case ToolAddTarget:
 		var target config.TargetDefinition
@@ -708,29 +803,32 @@ func (r *Registry) runManagementTool(connID, name string, args map[string]interf
 		}
 		body, _ := json.MarshalIndent(map[string]interface{}{"session_override_apis": rows}, "", "  ")
 		return okResult(string(body))
-	case ToolDescribeAPI:
+	case ToolGetAPIInfo:
 		api := strArg(args, "api")
 		entry, err := r.GetApiEntryView(api)
 		if err != nil {
 			return errResult(err)
 		}
-		opts := describeOpts{
-			include: map[string]bool{},
-			search:  strArg(args, "search"),
-			full:    strArg(args, "schema_detail") == "full",
-			sessionActive: func(opID string) bool {
-				live, ok := r.liveEntry(api)
-				return ok && r.opExposedForSession(connID, live, opID)
-			},
-		}
-		for _, inc := range strSliceArg(args, "include") {
-			opts.include[strings.ToLower(inc)] = true
-		}
-		body, err := describeAPIDoc(entry, opts)
+		body, err := apiInfoDoc(entry)
 		if err != nil {
 			return errResult(err)
 		}
-		return okResult(body)
+		return r.introspectionResult(body)
+	case ToolListEndpoints:
+		api := strArg(args, "api")
+		entry, err := r.GetApiEntryView(api)
+		if err != nil {
+			return errResult(err)
+		}
+		sessionActive := func(opID string) bool {
+			live, ok := r.liveEntry(api)
+			return ok && r.opExposedForSession(connID, live, opID)
+		}
+		body, err := describeEndpoints(entry, strArg(args, "search"), strings.ToUpper(strArg(args, "method")), intArg(args, "limit", 20), intArg(args, "offset", 0), sessionActive)
+		if err != nil {
+			return errResult(err)
+		}
+		return r.introspectionResult(body)
 	case ToolGetOperation:
 		api := strArg(args, "api")
 		opRef := strArg(args, "operation")
@@ -746,18 +844,18 @@ func (r *Registry) runManagementTool(connID, name string, args map[string]interf
 		if err != nil {
 			return errResult(err)
 		}
-		return okResult(body)
+		return r.introspectionResult(body)
 	case ToolListSchemas:
 		api := strArg(args, "api")
 		entry, err := r.GetApiEntryView(api)
 		if err != nil {
 			return errResult(err)
 		}
-		body, err := listAPISchemas(entry, strArg(args, "name"), boolArg(args, "expand"), strArg(args, "search"), intArg(args, "limit", 100), intArg(args, "offset", 0))
+		body, err := listAPISchemas(entry, strArg(args, "name"), boolArg(args, "expand"), strArg(args, "search"), intArg(args, "limit", defaultSchemaPageSize), intArg(args, "offset", 0))
 		if err != nil {
 			return errResult(err)
 		}
-		return okResult(body)
+		return r.introspectionResult(body)
 	case ToolSearchOperation:
 		api := strArg(args, "api")
 		entry, err := r.GetApiEntryView(api)
@@ -768,11 +866,11 @@ func (r *Registry) runManagementTool(connID, name string, args map[string]interf
 			live, ok := r.liveEntry(api)
 			return ok && r.opExposedForSession(connID, live, opID)
 		}
-		body, err := searchOperations(entry, strArg(args, "query"), strings.ToUpper(strArg(args, "method")), active)
+		body, err := searchOperations(entry, strArg(args, "query"), strings.ToUpper(strArg(args, "method")), intArg(args, "limit", defaultSearchPageSize), intArg(args, "offset", 0), active)
 		if err != nil {
 			return errResult(err)
 		}
-		return okResult(body)
+		return r.introspectionResult(body)
 	case ToolExportConfig:
 		api := strArg(args, "api")
 		entry, err := r.GetApiEntryView(api)
@@ -783,7 +881,7 @@ func (r *Registry) runManagementTool(connID, name string, args map[string]interf
 		if err != nil {
 			return errResult(err)
 		}
-		return okResult(body)
+		return r.introspectionResult(body)
 	case ToolRelogin:
 		if err := r.Relogin(strArg(args, "api"), strArg(args, "target")); err != nil {
 			return errResult(err)
@@ -875,6 +973,14 @@ func (r *Registry) runManagementTool(connID, name string, args map[string]interf
 			return errResult(err)
 		}
 		return okResult(body)
+	case ToolCallEndpoint:
+		text, err := r.callAPIEndpoint(connID, strArg(args, "api"), strArg(args, "operation"), args["arguments"])
+		if err != nil {
+			return errResult(err)
+		}
+		return okResult(text)
+	case ToolResultsGet, ToolResultsList, ToolResultsCleanup:
+		return r.runResultsTool(connID, name, args)
 	default:
 		return errResult(fmt.Errorf("unknown management tool %q", name))
 	}
@@ -889,21 +995,24 @@ func errResult(err error) managementToolResult {
 	return managementToolResult{ok: false, text: err.Error()}
 }
 
-// --- Introspection helpers ---
-
-// apiDocView is the JSON view returned by describe_openapi_api. It is fully
-// self-referencing: endpoints carry both their REST form and the MCP tool that
-// invokes them, and the tool schema/description _is_ the endpoint documentation.
-type apiDocView struct {
-	Info      apiInfoView               `json:"info"`
-	Auth      config.AuthConfig         `json:"auth,omitempty"`
-	Config    apiConfigView             `json:"config"`
-	Targets   []targetInfoView          `json:"targets,omitempty"`
-	Active    string                    `json:"active_target,omitempty"`
-	Endpoints []endpointView            `json:"endpoints,omitempty"`
-	Schemas   map[string]*mcp.SchemaDoc `json:"schemas,omitempty"`
+// introspectionResult caps the output of the API introspection tools. The
+// tools paginate (list_api_endpoints/search_openapi_operations accept
+// limit/offset) so large APIs are consumed in chunks, but a single
+// deliberately oversized request can still produce megabytes of JSON that
+// dominates a model's context window; such output is rejected with narrowing
+// guidance instead of being returned. The cap is server.max_introspection_bytes
+// (default 128 KiB).
+func (r *Registry) introspectionResult(body string) managementToolResult {
+	max := r.ServerConfig().EffectiveIntrospectionMaxBytes()
+	if len(body) <= max {
+		return okResult(body)
+	}
+	return errResult(fmt.Errorf("introspection output is %d bytes, exceeding the %d-byte cap (server.max_introspection_bytes). Narrow the request: pass search/method and a small limit/offset to list_api_endpoints or search_openapi_operations, use get_api_operation for a single operation, or list_api_schemas with a specific name / without expand=true", len(body), max))
 }
 
+// --- Introspection helpers ---
+
+// apiInfoView is the metadata section returned by get_api_info.
 type apiInfoView struct {
 	Name        string   `json:"name"`
 	Title       string   `json:"title,omitempty"`
@@ -930,6 +1039,16 @@ type targetInfoView struct {
 	BaseURL string `json:"base_url,omitempty"`
 }
 
+// Default page sizes for the paginated introspection listings. The defaults are
+// intentionally small so a plain call does not flood the model's context;
+// agents page through a large API in chunks via limit/offset and the returned
+// total/has_more block.
+const (
+	defaultEndpointPageSize = 20
+	defaultSchemaPageSize   = 50
+	defaultSearchPageSize   = defaultEndpointPageSize
+)
+
 // endpointView glues a REST endpoint to its MCP tool.
 type endpointView struct {
 	OperationID string   `json:"operation_id,omitempty"`
@@ -942,35 +1061,36 @@ type endpointView struct {
 	Active      bool     `json:"active,omitempty"`
 }
 
-type describeOpts struct {
-	include       map[string]bool        // section, when non-empty only these sections render
-	search        string                 // endpoint filter
-	full          bool                   // schema_detail == full
-	sessionActive func(opID string) bool // per-session exposure marker (nil for unexposed APIs/unknown)
-}
-
-func describeAPIDoc(entry *apiEntryView, opts describeOpts) (string, error) {
+// apiInfoDoc renders the get_api_info payload: the API's description and
+// configuration (info, auth, targets, active target, config filters). It is
+// compact and independent of API size — it never includes endpoints or schemas.
+func apiInfoDoc(entry *apiEntryView) (string, error) {
 	doc := entry.Doc
 	if doc == nil {
 		return "", fmt.Errorf("API %q has no parsed documentation", entry.Def.Name)
 	}
-	has := func(section string) bool {
-		if len(opts.include) == 0 {
-			return true
-		}
-		return opts.include[section]
-	}
-
 	var monitoring *config.MonitorConfig
 	if entry.Def.Monitoring.IsConfigured() {
 		m := entry.Def.Monitoring
 		monitoring = &m
 	}
-
-	view := apiDocView{
-		Auth:    entry.Def.Auth.Effective(),
-		Targets: []targetInfoView{},
-		Active:  entry.Def.ActiveTarget,
+	view := struct {
+		Info    apiInfoView       `json:"info"`
+		Auth    config.AuthConfig `json:"auth,omitempty"`
+		Config  apiConfigView     `json:"config"`
+		Targets []targetInfoView  `json:"targets,omitempty"`
+		Active  string            `json:"active_target,omitempty"`
+	}{
+		Info: apiInfoView{
+			Name:        entry.Def.Name,
+			Title:       doc.Title,
+			Version:     doc.Version,
+			Description: doc.Description,
+			Servers:     doc.Servers,
+			Tags:        doc.Tags,
+		},
+		Auth:   entry.Def.Auth.Effective(),
+		Active: entry.Def.ActiveTarget,
 		Config: apiConfigView{
 			IncludeTags:       entry.Def.IncludeTags,
 			ExcludeTags:       entry.Def.ExcludeTags,
@@ -982,40 +1102,41 @@ func describeAPIDoc(entry *apiEntryView, opts describeOpts) (string, error) {
 			Monitoring:        monitoring,
 			ToolCount:         len(entry.ToolSet.Tools),
 		},
-		Endpoints: []endpointView{},
-		Schemas:   map[string]*mcp.SchemaDoc{},
+		Targets: []targetInfoView{},
 	}
-	if has("info") {
-		view.Info = apiInfoView{
-			Name:        entry.Def.Name,
-			Title:       doc.Title,
-			Version:     doc.Version,
-			Description: doc.Description,
-			Servers:     doc.Servers,
-			Tags:        doc.Tags,
-		}
-	} else {
-		view.Info.Name = entry.Def.Name
+	for _, t := range entry.Def.Targets {
+		view.Targets = append(view.Targets, targetInfoView{Name: t.Name, BaseURL: t.BaseURL})
 	}
-	if has("targets") {
-		for _, t := range entry.Def.Targets {
-			view.Targets = append(view.Targets, targetInfoView{Name: t.Name, BaseURL: t.BaseURL})
-		}
+	body, err := json.MarshalIndent(view, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed rendering API info: %w", err)
 	}
-	if !has("auth") {
-		view.Auth = config.AuthConfig{}
-	}
+	return string(body), nil
+}
 
-	// Endpoints (optionally filtered by search / limited by include).
-	limit := -1
+// describeEndpoints renders the list_api_endpoints payload: a paginated index
+// of an API's endpoints (operationId, method, path, summary, MCP tool name),
+// optionally filtered by a substring search and an HTTP method.
+func describeEndpoints(entry *apiEntryView, search, method string, limit, offset int, sessionActive func(opID string) bool) (string, error) {
+	doc := entry.Doc
+	if doc == nil {
+		return "", fmt.Errorf("API %q has no parsed documentation", entry.Def.Name)
+	}
+	if method != "" {
+		method = strings.ToUpper(method)
+	}
+	all := []endpointView{}
 	for _, ep := range doc.Endpoints {
-		if opts.search != "" {
+		if method != "" && !strings.EqualFold(ep.Method, method) {
+			continue
+		}
+		if search != "" {
 			hay := strings.ToLower(ep.OperationID + " " + ep.Path + " " + ep.Summary + " " + strings.Join(ep.Tags, " "))
-			if !strings.Contains(hay, strings.ToLower(opts.search)) {
+			if !strings.Contains(hay, strings.ToLower(search)) {
 				continue
 			}
 		}
-		view.Endpoints = append(view.Endpoints, endpointView{
+		all = append(all, endpointView{
 			OperationID: ep.OperationID,
 			ToolName:    toolFullName(entry.Def.Name, ep.OperationID),
 			Method:      ep.Method,
@@ -1023,30 +1144,34 @@ func describeAPIDoc(entry *apiEntryView, opts describeOpts) (string, error) {
 			Summary:     ep.Summary,
 			Description: ep.Description,
 			Tags:        ep.Tags,
-			Active:      opts.sessionActive != nil && opts.sessionActive(ep.OperationID),
+			Active:      sessionActive != nil && sessionActive(ep.OperationID),
 		})
-		if limit != -1 && len(view.Endpoints) >= limit {
-			break
-		}
 	}
-	if !has("endpoints") {
-		view.Endpoints = []endpointView{}
+	if limit <= 0 {
+		limit = defaultEndpointPageSize
 	}
-
-	// Schemas (compact or full; only when requested).
-	if has("schemas") {
-		if opts.full {
-			view.Schemas = doc.Schemas
-		} else {
-			for n, s := range doc.Schemas {
-				view.Schemas[n] = &mcp.SchemaDoc{Name: n, Type: s.Type, Ref: s.Ref, Description: s.Description}
-			}
-		}
+	if offset < 0 {
+		offset = 0
 	}
-
-	body, err := json.MarshalIndent(view, "", "  ")
+	if offset > len(all) {
+		offset = len(all)
+	}
+	end := offset + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	body, err := json.MarshalIndent(map[string]interface{}{
+		"api":       entry.Def.Name,
+		"search":    search,
+		"method":    method,
+		"total":     len(all),
+		"offset":    offset,
+		"limit":     limit,
+		"has_more":  end < len(all),
+		"endpoints": all[offset:end],
+	}, "", "  ")
 	if err != nil {
-		return "", fmt.Errorf("failed rendering API documentation: %w", err)
+		return "", fmt.Errorf("failed rendering endpoint index: %w", err)
 	}
 	return string(body), nil
 }
@@ -1187,7 +1312,7 @@ func listAPISchemas(entry *apiEntryView, name string, expand bool, search string
 		offset = 0
 	}
 	if limit <= 0 {
-		limit = 100
+		limit = defaultSchemaPageSize
 	}
 	end := offset + limit
 	if end > len(names) {
@@ -1222,13 +1347,13 @@ func listAPISchemas(entry *apiEntryView, name string, expand bool, search string
 	return string(body), nil
 }
 
-func searchOperations(entry *apiEntryView, query, method string, active func(opID string) bool) (string, error) {
+func searchOperations(entry *apiEntryView, query, method string, limit, offset int, active func(opID string) bool) (string, error) {
 	doc := entry.Doc
 	if doc == nil {
 		return "", fmt.Errorf("API %q has no parsed documentation", entry.Def.Name)
 	}
 	q := strings.ToLower(query)
-	results := []endpointView{}
+	all := []endpointView{}
 	for _, ep := range doc.Endpoints {
 		if method != "" && !strings.EqualFold(ep.Method, method) {
 			continue
@@ -1237,7 +1362,7 @@ func searchOperations(entry *apiEntryView, query, method string, active func(opI
 		if !strings.Contains(hay, q) {
 			continue
 		}
-		results = append(results, endpointView{
+		all = append(all, endpointView{
 			OperationID: ep.OperationID,
 			ToolName:    toolFullName(entry.Def.Name, ep.OperationID),
 			Method:      ep.Method,
@@ -1247,10 +1372,31 @@ func searchOperations(entry *apiEntryView, query, method string, active func(opI
 			Active:      active != nil && active(ep.OperationID),
 		})
 	}
-	if len(results) == 0 {
+	if len(all) == 0 {
 		return okMessage(fmt.Sprintf("No operations in API %q match %q.", entry.Def.Name, query)), nil
 	}
-	body, err := json.MarshalIndent(map[string]interface{}{"api": entry.Def.Name, "query": query, "matches": results}, "", "  ")
+	if limit <= 0 {
+		limit = defaultSearchPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(all) {
+		offset = len(all)
+	}
+	end := offset + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	body, err := json.MarshalIndent(map[string]interface{}{
+		"api":      entry.Def.Name,
+		"query":    query,
+		"total":    len(all),
+		"limit":    limit,
+		"offset":   offset,
+		"has_more": end < len(all),
+		"matches":  all[offset:end],
+	}, "", "  ")
 	if err != nil {
 		return "", err
 	}
@@ -1340,6 +1486,69 @@ func formatSpecTimestamp(ts time.Time) string {
 		return ""
 	}
 	return ts.UTC().Format(time.RFC3339)
+}
+
+// callAPIEndpoint calls any registered API operation directly by API name and
+// operationId (or full tool name <api>__<op>). Unlike the generated per-operation
+// tools it bypasses the runtime exposure gate, so it can reach every registered
+// operation regardless of mode. Target resolution, auth, login-token handling and
+// argument serialization are identical to calling the generated tool.
+func (r *Registry) callAPIEndpoint(connID, apiName, operation string, arguments interface{}) (string, error) {
+	apiName = strings.TrimSpace(apiName)
+	operation = strings.TrimSpace(operation)
+	if apiName == "" {
+		return "", fmt.Errorf("api is required")
+	}
+	if operation == "" {
+		return "", fmt.Errorf("operation is required")
+	}
+	args := map[string]interface{}{}
+	if m, ok := arguments.(map[string]interface{}); ok {
+		args = m
+	} else if b, ok := arguments.(json.RawMessage); ok {
+		if err := json.Unmarshal(b, &args); err != nil {
+			return "", fmt.Errorf("arguments must be a JSON object: %w", err)
+		}
+	} else if arguments != nil {
+		return "", fmt.Errorf("arguments must be a JSON object, got %T", arguments)
+	}
+
+	fullName := operation
+	if !strings.Contains(operation, toolNameSep) {
+		fullName = toolFullName(apiName, operation)
+	}
+	entry, tool, ok := r.ResolveTool(fullName)
+	if !ok {
+		return "", fmt.Errorf("no operation %q found on API %q (use get_api_operation / list_api_endpoints to list operationIds)", operation, apiName)
+	}
+	if entry.Def.Name != apiName && strings.Contains(operation, toolNameSep) {
+		return "", fmt.Errorf("operation %q belongs to API %q, not %q", operation, entry.Def.Name, apiName)
+	}
+	// The operator's allow-set (include_*/exclude_* config) is a hard boundary:
+	// an operation the operator excluded can never be called, not even through
+	// call_api_endpoint. Exposure (mode/active) is prompt-surface tuning the
+	// agent may change, so it is deliberately NOT enforced here.
+	if !allowSetAllows(tool.Name, entry.OpTags[tool.Name], &entry.Def) {
+		return "", fmt.Errorf("operation %q on API %q is excluded by the API's allow-set (include/exclude config) and cannot be called", operation, apiName)
+	}
+
+	req, _, cfg, err := buildRegisteredRequestFor(r, connID, &ToolCallParams{ToolName: fullName, Input: args})
+	if err != nil {
+		return "", err
+	}
+	resp, err := httpClientForConfig(cfg).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("reading response body: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return string(body), fmt.Errorf("API call to %s failed with HTTP %s: %s", fullName, resp.Status, string(body))
+	}
+	return string(body), nil
 }
 
 // previewAPICall builds the literal request a tool call would send, without

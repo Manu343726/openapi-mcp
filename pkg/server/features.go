@@ -33,7 +33,8 @@ var managementToolFeature = map[string]string{
 	ToolClearSessionTarget: featureAPIRegistration,
 	ToolGetSessionTarget:   featureAPIRegistration,
 
-	ToolDescribeAPI:     featureAPIIntrospection,
+	ToolGetAPIInfo:      featureAPIIntrospection,
+	ToolListEndpoints:   featureAPIIntrospection,
 	ToolGetOperation:    featureAPIIntrospection,
 	ToolListSchemas:     featureAPIIntrospection,
 	ToolSearchOperation: featureAPIIntrospection,

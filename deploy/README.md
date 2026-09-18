@@ -87,9 +87,11 @@ change is written back to `./config/config.yaml` so it survives restarts:
 | `unregister_api_target` | Remove a target |
 | `list_api_targets` | List an API's targets |
 | `set_active_api_target` / `clear_active_api_target` / `get_active_api_target` | Manage the per-API default target |
-| `describe_openapi_api` | Full API documentation: info, servers, endpoints, DTO schemas, auth + target config |
+| `get_api_info` | Compact API metadata: info, servers, auth + target config |
+| `list_api_endpoints` | Paginated endpoint index: operationId, method, path, tool_name |
 | `get_api_operation` | Detailed docs for one endpoint/operation (parameters, request/response schemas) |
 | `list_api_schemas` | List/expand an API's DTO schemas by name |
+| `call_api_endpoint` | Call any operation by `api` + `operationId` with an `arguments` map — one tool for everything, never hidden by exposure |
 
 ## Dockhand-managed deployment
 

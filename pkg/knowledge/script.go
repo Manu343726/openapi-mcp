@@ -76,6 +76,12 @@ func parseTengoDoc(data []byte) (*Doc, error) {
 	if doc.Kind == "" {
 		doc.Kind = KindScript
 	}
+	// Strip front-matter from Source: keep only lines after closing // ---
+	if end+1 < len(lines) {
+		doc.Source = strings.Join(lines[end+1:], "\n")
+	} else {
+		doc.Source = ""
+	}
 	return doc, nil
 }
 

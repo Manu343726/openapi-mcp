@@ -102,13 +102,19 @@ curl -s -X POST http://localhost:18080/mcp \
 curl -s -X POST http://localhost:18080/mcp -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_openapi_apis","arguments":{}}}'
 curl -s -X POST http://localhost:18080/mcp -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-  -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"describe_openapi_api","arguments":{"api":"petstore"}}}'
+  -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list_api_endpoints","arguments":{"api":"petstore"}}}'
+curl -s -X POST http://localhost:18080/mcp -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"call_api_endpoint","arguments":{"api":"petstore","operation":"findPetsByStatus","arguments":{"status":"available"}}}}'
 ```
 
 `preview_api_call` is a dry run — it returns the exact HTTP request a tool call
 would send (method, URL, headers, body) **without** executing it. Use it to
 verify parameter serialization, target resolution, and auth header injection
-before anything hits the network.
+before anything hits the network. `call_api_endpoint` is the executing
+counterpart: it calls any registered operation by `api` + `operationId` (or full
+tool name) with a `target` override, and — unlike the generated per-operation
+tools — it works regardless of the API's exposure mode (so a minimal-footprint
+server is still fully callable).
 
 To debug the request the server would actually emit, use `preview_api_call` for
 a fully offline check; to hit a real API, call the tool.
@@ -210,7 +216,7 @@ Suggestions for what to test against each:
 - **Parsing / validation** (smoke test): Petstore v3, NWS, OE API.
 - **OpenAPI 3.1 path**: NWS (`/openapi.json`), Discourse, Resend.
 - **Auth inference** (`securitySchemes` → API-level `auth`): People Data Labs,
-  Geoapify, Stytch, Paystack. Register the spec, then `describe_openapi_api` and
+  Geoapify, Stytch, Paystack. Register the spec, then `get_api_info` and
   confirm the inferred auth in `export_openapi_config`.
 - **Tool-name truncation / scale**: Trello (many operations), then verify the
   capped `<api>__<operationId>` names appear consistently in `tools/list`, tool
@@ -420,3 +426,29 @@ These are deliberate constraints — the tests and behavior rely on them.
   cases when they land.
 - Unknown methods that start with `notifications/` are ignored; other unknown
   requests still log a warning and return `-32601`.
+
+## Ephemeral results store (`pkg/results`, `pkg/server/results.go`)
+
+Large tool/script outputs are externalized to keep the MCP response model (and
+the agent context) small:
+
+- When a successful `call_tool` response's single text payload exceeds
+  `server.results.max_inline_bytes` (default 64 KiB), `Registry.externalizePayload`
+  stores it and replaces the inline text with a compact handle payload
+  `{"handle":"r_<uuid>","tool","kind","bytes","expires_in_s","truncated"}`.
+- The store is file-backed (`pkg/results`): each result is `<id>.json` metadata
+  + `<id>.data` payload, written atomically and indexed from disk on startup.
+  Entries are session-scoped — `Get`/`Delete`/`List` only see the caller's
+  session — and expire after `ttl_s` (default 1800 s) via a background sweeper
+  (`sweep_interval_s`, default 60 s). Handle lookup returns `ErrNotFound`,
+  `ErrExpired` or `ErrForbidden`.
+- Clients fetch results with the `results_get`, `results_list` and
+  `results_cleanup` management tools. The session view projection
+  (`pkg/server/views.go` `viewParams`) dereferences handles transparently and
+  adds a `handle` param to the entry so the UI can link the payload.
+- Externalization is skipped for error results, for non-text (image) content
+  and for the `results_get`/`view` tools themselves (so handles stay usable).
+  Errors always return the full error text inline.
+- Disable the store with `server.results.enabled: false` to always inline
+  results, or tune `dir` / `max_inline_bytes` / `ttl_s` / `sweep_interval_s`
+  (default `dir` is a per-process temp dir).

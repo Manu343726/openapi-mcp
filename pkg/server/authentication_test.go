@@ -72,14 +72,14 @@ func TestInferLoginOperationNone(t *testing.T) {
 
 func TestLoginOperationPrecedence(t *testing.T) {
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "loginapi",
 		Spec: loginSpec,
 		Auth: config.AuthConfig{
 			Type:           config.AuthCustomLogin,
 			LoginOperation: "getMe", // explicitly wrong on purpose
 		},
-	}, false)
+	}), false)
 	require.NoError(t, err)
 	api, _, _ := reg.ResolveTool("loginapi__getMe")
 	require.NotNil(t, api)
@@ -176,14 +176,14 @@ func TestLoginFlowExecutesAndInjectsToken(t *testing.T) {
 	defer backend.Close()
 
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "loginapi",
 		Spec: loginSpec,
 		Auth: config.AuthConfig{Type: config.AuthCustomLogin},
 		Targets: []config.TargetDefinition{
 			{Name: "default", BaseURL: backend.URL, LoginUsername: "alice", LoginPassword: "s3cret"},
 		},
-	}, false)
+	}), false)
 	require.NoError(t, err)
 
 	httpResp, err := executeRegisteredTool(reg, "", &ToolCallParams{
@@ -212,14 +212,14 @@ func TestLoginFlowTokenCachedAcrossCalls(t *testing.T) {
 	defer backend.Close()
 
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "loginapi",
 		Spec: loginSpec,
 		Auth: config.AuthConfig{Type: config.AuthCustomLogin},
 		Targets: []config.TargetDefinition{
 			{Name: "default", BaseURL: backend.URL, LoginUsernameEnv: "TL_USER", LoginPasswordEnv: "TL_PASS"},
 		},
-	}, false)
+	}), false)
 	t.Setenv("TL_USER", "alice")
 	t.Setenv("TL_PASS", "s3cret")
 
@@ -247,14 +247,14 @@ func TestLoginOperationMissingErrors(t *testing.T) {
 	defer backend.Close()
 
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "nologin",
 		Spec: spec,
 		Auth: config.AuthConfig{Type: config.AuthCustomLogin},
 		Targets: []config.TargetDefinition{
 			{Name: "default", BaseURL: backend.URL, LoginUsername: "u", LoginPassword: "p"},
 		},
-	}, false)
+	}), false)
 
 	_, err := executeRegisteredTool(reg, "", &ToolCallParams{ToolName: "nologin__ping", Input: map[string]interface{}{}})
 	assert.ErrorContains(t, err, "no login operation")
@@ -272,14 +272,14 @@ func TestLoginTokenNotInResponseErrors(t *testing.T) {
 	defer backend.Close()
 
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "loginapi",
 		Spec: loginSpec,
 		Auth: config.AuthConfig{Type: config.AuthCustomLogin},
 		Targets: []config.TargetDefinition{
 			{Name: "default", BaseURL: backend.URL, LoginUsername: "u", LoginPassword: "p"},
 		},
-	}, false)
+	}), false)
 
 	_, err := executeRegisteredTool(reg, "", &ToolCallParams{ToolName: "loginapi__getMe", Input: map[string]interface{}{}})
 	assert.ErrorContains(t, err, "no token was found")
@@ -292,7 +292,7 @@ func TestLoginMissingCredentialsErrors(t *testing.T) {
 	defer backend.Close()
 
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "loginapi",
 		Spec: loginSpec,
 		Auth: config.AuthConfig{Type: config.AuthCustomLogin},
@@ -300,7 +300,7 @@ func TestLoginMissingCredentialsErrors(t *testing.T) {
 			// UsesLogin() true (env configured) but env not set -> empty creds.
 			{Name: "default", BaseURL: backend.URL, LoginUsernameEnv: "UNSET_USER", LoginPasswordEnv: "UNSET_PASS"},
 		},
-	}, false)
+	}), false)
 
 	_, err := executeRegisteredTool(reg, "", &ToolCallParams{ToolName: "loginapi__getMe", Input: map[string]interface{}{}})
 	assert.ErrorContains(t, err, "login credentials")
@@ -326,28 +326,28 @@ func TestLoginTokenAttachmentLocations(t *testing.T) {
 
 	// Query location.
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "loginapi",
 		Spec: loginSpec,
 		Auth: config.AuthConfig{Type: config.AuthCustomLogin, Name: "session", In: "query"},
 		Targets: []config.TargetDefinition{
 			{Name: "default", BaseURL: backend.URL, LoginUsername: "u", LoginPassword: "p"},
 		},
-	}, false)
+	}), false)
 	_, err := executeRegisteredTool(reg, "", &ToolCallParams{ToolName: "loginapi__getMe", Input: map[string]interface{}{}})
 	require.NoError(t, err)
 	assert.Equal(t, "TOK", receivedQuery.Load())
 
 	// Cookie location (fresh registry so login re-runs).
 	reg = NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "loginapi",
 		Spec: loginSpec,
 		Auth: config.AuthConfig{Type: config.AuthCustomLogin, Name: "session", In: "cookie"},
 		Targets: []config.TargetDefinition{
 			{Name: "default", BaseURL: backend.URL, LoginUsername: "u", LoginPassword: "p"},
 		},
-	}, false)
+	}), false)
 	_, err = executeRegisteredTool(reg, "", &ToolCallParams{ToolName: "loginapi__getMe", Input: map[string]interface{}{}})
 	require.NoError(t, err)
 	assert.Equal(t, "TOK", receivedCookie.Load())
@@ -420,28 +420,28 @@ func TestAPIKeyInjectionAtAPIAuth(t *testing.T) {
 
 	// Header placement (from API-level Auth).
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "keyed",
 		Spec: registryTestV3Spec,
 		Auth: config.AuthConfig{Type: config.AuthAPIKey, In: "header", Name: "X-API-Key"},
 		Targets: []config.TargetDefinition{
 			{Name: "default", BaseURL: backend.URL, APIKey: "k-hdr"},
 		},
-	}, false)
+	}), false)
 	_, err := executeRegisteredTool(reg, "", &ToolCallParams{ToolName: "keyed__getCurrent", Input: map[string]interface{}{}})
 	require.NoError(t, err)
 	assert.Equal(t, "k-hdr", gotHdr.Load())
 
 	// Query placement.
 	reg = NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "keyed",
 		Spec: registryTestV3Spec,
 		Auth: config.AuthConfig{Type: config.AuthAPIKey, In: "query", Name: "key"},
 		Targets: []config.TargetDefinition{
 			{Name: "default", BaseURL: backend.URL, APIKey: "k-query"},
 		},
-	}, false)
+	}), false)
 	_, err = executeRegisteredTool(reg, "", &ToolCallParams{ToolName: "keyed__getCurrent", Input: map[string]interface{}{}})
 	require.NoError(t, err)
 	assert.Equal(t, "k-query", gotQuery.Load())
@@ -458,14 +458,14 @@ func TestHTTPBasicAuth(t *testing.T) {
 	defer backend.Close()
 
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "basic",
 		Spec: registryTestV3Spec,
 		Auth: config.AuthConfig{Type: config.AuthHTTP, HTTPScheme: "basic"},
 		Targets: []config.TargetDefinition{
 			{Name: "default", BaseURL: backend.URL, LoginUsername: "user1", LoginPassword: "pass1"},
 		},
-	}, false)
+	}), false)
 	_, err := executeRegisteredTool(reg, "", &ToolCallParams{ToolName: "basic__getCurrent", Input: map[string]interface{}{}})
 	require.NoError(t, err)
 	assert.Equal(t, "Basic dXNlcjE6cGFzczE=", gotHdr.Load()) // base64("user1:pass1")
@@ -492,7 +492,7 @@ func TestOAuth2PasswordFlow(t *testing.T) {
 
 	// API-level auth: oauth2 password with a token URL.
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "oauth",
 		Spec: registryTestV3Spec,
 		Auth: config.AuthConfig{
@@ -504,7 +504,7 @@ func TestOAuth2PasswordFlow(t *testing.T) {
 		Targets: []config.TargetDefinition{
 			{Name: "default", BaseURL: backend.URL, LoginUsername: "alice", LoginPassword: "secret"},
 		},
-	}, false)
+	}), false)
 
 	_, err := executeRegisteredTool(reg, "", &ToolCallParams{ToolName: "oauth__getCurrent", Input: map[string]interface{}{}})
 	require.NoError(t, err)
@@ -547,27 +547,27 @@ func TestInsecureSkipVerifyTLS(t *testing.T) {
 
 	// 1) Without insecure_skip_verify the call must fail (TLS handshake error).
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "tlsapi",
 		Spec: loginSpec,
 		Auth: config.AuthConfig{Type: config.AuthCustomLogin},
 		Targets: []config.TargetDefinition{
 			{Name: "default", BaseURL: backend.URL, LoginUsername: "u", LoginPassword: "p"},
 		},
-	}, false)
+	}), false)
 	_, err := executeRegisteredTool(reg, "", &ToolCallParams{ToolName: "tlsapi__getMe", Input: map[string]interface{}{}})
 	require.Error(t, err, "call against self-signed TLS must fail without insecure_skip_verify")
 
 	// 2) With insecure_skip_verify the call succeeds.
 	reg2 := NewRegistry("")
-	reg2.RegisterAPI(config.APIDefinition{
+	reg2.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "tlsapi",
 		Spec: loginSpec,
 		Auth: config.AuthConfig{Type: config.AuthCustomLogin},
 		Targets: []config.TargetDefinition{
 			{Name: "default", BaseURL: backend.URL, LoginUsername: "u", LoginPassword: "p", InsecureSkipVerify: true},
 		},
-	}, false)
+	}), false)
 	httpResp, err := executeRegisteredTool(reg2, "", &ToolCallParams{ToolName: "tlsapi__getMe", Input: map[string]interface{}{}})
 	require.NoError(t, err)
 	defer httpResp.Body.Close()

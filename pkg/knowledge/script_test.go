@@ -34,8 +34,11 @@ return func("df", mount)
 	if len(doc.Params) != 1 || doc.Params[0].Name != "mount" {
 		t.Fatalf("unexpected params: %+v", doc.Params)
 	}
-	if doc.Source == "" || doc.Source != doc.Body {
-		t.Fatalf("tengo source should mirror body")
+	if doc.Source == "" || doc.Source != "func := import(\"os/exec\")\nreturn func(\"df\", mount)\n" {
+		t.Fatalf("tengo source should be the code after front-matter, got %q", doc.Source)
+	}
+	if doc.Body != string(src) {
+		t.Fatalf("tengo Body should mirror the whole file")
 	}
 }
 

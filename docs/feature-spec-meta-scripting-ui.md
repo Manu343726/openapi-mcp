@@ -132,9 +132,18 @@ is familiar with `docs/knowledge.md` (`Backend`, `Library`, `Doc`, capability
   `IncludeTags/ExcludeTags/IncludeOps/ExcludeOps` destructively); the full
   `ToolSet` and `ApiDoc` are always kept. The existing `include_*`/`exclude_*`
   config becomes the **authoritative allow-set** (the agent can *never* expose
-  something the operator excluded) and the new `exposure:` overlay only narrows
-  or widens **within** it. Default runtime mode is `all`, so existing configs
-  behave exactly as today.
+  or call something the operator excluded — this is the security boundary) and
+  the new `exposure:` overlay only narrows or widens **within** it. Default
+  runtime mode is `none` (a minimal footprint: no API tool is served until
+  activated), so registrations that say nothing about exposure start out hidden;
+  operators opt into `mode: all` explicitly.
+- **Exposure is prompt tuning, not permissions.** Because the agent itself can
+  change exposure (`update_api_exposure` / `update_session_api_exposure`), it is
+  explicitly **not** an authorization mechanism — it controls the *prompt
+  footprint* (which tools appear in `tools/list`). The only operator-enforced
+  boundary is the allow-set. `call_api_endpoint` implements this cleanly: it
+  reaches any operation regardless of `mode`, but refuses operations excluded by
+  the allow-set.
 - **Exposure is two-layered: a global/persisted baseline plus a per-session
   override.** The global baseline (operator config + `update_api_exposure`) is
   what a fresh session sees; each connection can then override it **for its own
@@ -569,7 +578,7 @@ apis:
     source: ...
     exposure:
       active: true          # whole-API on/off
-      mode: all             # all | none (bootstrap a minimal footprint with none)
+      mode: all             # all | none (default is none: minimal footprint until activated)
       active_tags: []
       active_ops: []
       disabled_tags: []
@@ -610,7 +619,7 @@ Introspection tools report activation state **as seen by the calling session**
 
 - `list_openapi_apis` → per API adds `exposedTools: N/M` (session view),
   `active`, `mode`, `sessionOverride: true|false`.
-- `describe_openapi_api` (endpoints) → each endpoint marked
+- `list_api_endpoints` (endpoints) → each endpoint marked
   `active: true|false` for this session.
 - `search_openapi_operations` → each hit marked with its current (session) state.
 - `get_api_operation` → notes the tool's current exposure for this session and
@@ -655,9 +664,12 @@ Introspection tools report activation state **as seen by the calling session**
 The following stay exposed no matter what is deactivated (they are the reason an
 agent can always recover):
 
-- registry/management tools (`list_openapi_apis`, `describe_openapi_api`,
-  `search_openapi_operations`, `get_api_operation`, `list_api_schemas`,
-  `export_openapi_config`, `test_api_target`, ...),
+- registry/management tools (`list_openapi_apis`, `get_api_info`,
+  `list_api_endpoints`, `search_openapi_operations`, `get_api_operation`,
+  `list_api_schemas`, `export_openapi_config`, `test_api_target`,
+  **`call_api_endpoint`** — the always-on generic caller that reaches any
+  operation regardless of exposure, so even with API tools hidden the agent can
+  still call the machine, ...),
 - exposure tools (`update_api_exposure`, `update_session_api_exposure`,
   `clear_session_api_exposure`, `api_exposure`),
 - knowledge tools and `_meta` tools (`capabilities`, `discover_task`,
@@ -665,7 +677,8 @@ agent can always recover):
   `memorize`).
 
 If the agent renders "I cannot see any tools", `list_openapi_apis` /
-`api_exposure` still answer and `update_api_exposure` still works.
+`api_exposure` still answer, `update_api_exposure` still works, and
+`call_api_endpoint` still calls any endpoint by `api`+`operationId`.
 
 ### 3.7 OpenCode on-the-fly tool updates
 
@@ -700,8 +713,9 @@ If the agent renders "I cannot see any tools", `list_openapi_apis` /
   global baseline is reapplied on top; session overrides keep their op/tag lists
   (re-resolved against the new spec — an op that disappears from the spec simply
   stops matching). Tools added by a spec update appear as `hidden` until
-  activated (default mode `all` exposes them, consistent with how auto-reload
-  behaves today).
+  activated (default mode `none` keeps newly added tools hidden; an operator
+  that registered the API with `mode: all` gets them exposed right away, as
+  before).
 - **Session lifecycle and defaults**: a new session has no override and inherits
   the global baseline (backward compatible — single-operator deployments see no
   change). An override lasts as long as the connection: `DropSession(connID)`
@@ -1031,9 +1045,14 @@ Phase 5–6, open `/ui` and drive a chat tool call end-to-end. Phase 7 adds the
    reuse.
 4. CopilotKit version to pin and whether to use its cloud runtime or the local
    bridge only (spec: local bridge only, revisit if streaming complexity grows).
-5. Exposure defaults: keep `mode: all` per API (backward compatible) or offer a
-   global default (`server.exposure.default_mode`) that new registrations inherit,
-   so operators can ship minimal-footprint registries out of the box.
+5. Exposure defaults: **decided — flip the built-in default to `mode: none`**
+   (minimal footprint: no API tool served until activated). This supersedes the
+   earlier "keep `mode: all` per API (backward compatible)" stance and the idea
+   of a `server.exposure.default_mode` knob: registrations that say nothing about
+   exposure now start out hidden (prompt footprint; exposure is not
+   authorization — the agent can change it, and `call_api_endpoint` is always
+   available). `NormalizeDefaults` fills `Mode = none` when unset; operators opt
+   into `mode: all` explicitly.
 6. Whether the global baseline's deactivations are a hard floor or soft
    (sessions may re-activate within the allow-set; spec defaults to **soft**,
    allow-set is the only hard boundary). Consider an optional per-API
@@ -1188,13 +1207,13 @@ Tracked against §6. Each item links the working changes that shipped it.
     `api_exposure` (+ schemas and `exposurePatchFromArgs`/`exposureConfigFromArgs`);
     `register_openapi_api` accepts an `exposure` object; introspection annotates
     the session view (`list_openapi_apis` adds `exposed_tools`/`active`/`mode`/
-    `session_override`, `describe_openapi_api`/`search_openapi_operations` mark
+    `session_override`, `list_api_endpoints`/`search_openapi_operations` mark
     each endpoint `active`, `get_api_operation` reports exposure, and
     `export_openapi_config` includes the global `exposure` baseline).
   - `pkg/server/tasks.go`: `run_task` dry-run flags steps whose tool is not
     exposed to the session (`not exposed in this session — enable with
     update_session_api_exposure`); auto mode fails fast through the call gate.
-  - Tests (`pkg/server/exposure_test.go`): defaults expose-all, global
+  - Tests (`pkg/server/exposure_test.go`): defaults expose-none, global
     deactivate/reactivate, mode `none` + tag footprint + `all` reset, session
     overrides that neither leak (`sessA` vs `sessB`) nor survive `DropSession`,
     widening within the allow-set, allow-set as a hard boundary
@@ -1339,6 +1358,53 @@ next to a Library tab that launches dashboards/views onto the board
 
 **Latest landed (this session — production hardening, not a phase):**
 
+- **Introspection split — no whole-API dump tool.** `describe_openapi_api` was
+  **removed** (`pkg/server/management.go`, `features.go`, tool defs) and replaced
+  with fine-grained, individually-bounded tools: `get_api_info` (compact,
+  fixed-size metadata — info/auth/targets/config, never endpoints/schemas) and
+  `list_api_endpoints` (paginated endpoint index: operationId/method/path/
+  summary/tool_name, optional `search`+`method` filters, `limit`/`offset`
+  default 20, `total`/`has_more` block). Per-endpoint and per-schema detail is
+  fetched via `get_api_operation` / `list_api_schemas` (default page 50).
+  This was the follow-up to the earlier pagination work: a large API is explored
+  in bounded chunks instead of one context-flooding summary. The
+  `max_introspection_bytes` backstop (128 KiB) remains and its rejection message
+  now points at the narrow tools. Search default is 20. Tests:
+  `pkg/server/introspection_test.go` (`TestGetAPIInfo`,
+  `TestListAPIEndpoints`, `TestListEndpointsFilters`,
+  `TestIntrospectionEndpointPagination`, `TestIntrospectionSchemaPagination`);
+  legacy V2 / external-refs / handler / feature-gate tests updated to the new
+  names. Docs: `api-introspection.md`, `config-file.md`, `README.md`,
+  `development.md`, `deploy/README.md`.
+
+- **`list_openapi_apis` no longer dumps every tool name per API.** The registry
+  listing inlined `APISummary.Tools` (one name per operation: finn 311 +
+  mortimer 132 + mofli 59 ≈ 29 KiB on this deployment), the same context-flood
+  class as the removed `describe_openapi_api`. The handler
+  (`pkg/server/management.go`, `case ToolListAPIs`) now renders a compact row per
+  API — name/title/source/spec version/timestamps, `tool_count`, `exposed_tools`,
+  `active`, `mode`, `session_override`, `active_target`, `targets` — and emits the
+  full `tools` array only when called with `include:["tools"]` (schema
+  `listAPIsSchema()`), mirroring `api_exposure`'s `include` knob. `APISummary` /
+  `APIsForSession` are unchanged (still carry `Tools` for internal consumers like
+  the UI manifest and script counting). Test:
+  `TestListOpenAPIsCompactByDefault`. Docs: `README.md`.
+
+- **`call_api_endpoint` — one tool reaches every operation.** A new always-on
+  core management tool (`pkg/server/management.go`, `callAPIEndpoint`) calls any
+  registered API operation by `api` + `operationId` (or full `<api>__<op>`) with
+  an `arguments` map. It routes through the same `buildRegisteredRequestFor` /
+  `httpClientForConfig` path as the generated tools (target override, auth,
+  login-token handling, argument serialization all identical) but **bypasses the
+  runtime exposure gate**, because exposure is prompt-surface tuning, not
+  permissions (the agent can change it itself). The one hard boundary it still
+  enforces is the operator's allow-set (`allowSetAllows`): an operation excluded
+  by `include_*`/`exclude_*` config can never be called through it. Discovery
+  stays fine-grained (`get_api_operation` / `list_api_endpoints` /
+  `get_api_info`). Tests: `TestCallAPIEndpoint`, `TestCallAPIEndpointRespectsAllowSet`.
+  Docs: `README.md`, `docs/development.md`, `docs/api-introspection.md`,
+  `deploy/README.md`.
+
 - **Hardening** (server.go): 16 MiB request-body cap (`-32700` on malformed
   JSON, `-32000`/413 on oversize), panic-recovery middleware (`-32603`/500),
   `http.Server` read/write/idle timeouts, API-key note only prepended when the
@@ -1373,6 +1439,37 @@ next to a Library tab that launches dashboards/views onto the board
   and `api_exposure` gained `include: [summary]` to drop the per-operation
   rows. Docs: `docs/knowledge.md` now specifies literal inputs and the
   `view:`/`dashboard` front-matter shape.
+- **Ephemeral results store (token-overhead hardening, outside the phase plan):
+   `pkg/results`** — oversized tool/script outputs are written out-of-line and
+   referenced by a compact `r_<uuid>` handle instead of being inlined into the
+   MCP `call_tool` response. `Registry.externalizePayload` (`pkg/server/server.go`)
+   swaps any single-text result over `server.results.max_inline_bytes` (default
+   64 KiB; skipped for errors, `results_get` and `view` tools) for a handle
+   payload; `results_get` / `results_list` / `results_cleanup` management tools
+   fetch/list/purge entries; the session view projection (`viewParams`) dereferences
+   handles transparently and tags cards with a `handle` param. Store is
+   file-backed, session-scoped, TTL-expiring (default 1800 s, sweeper every 60 s).
+   Config: `server.results.{enabled,dir,max_inline_bytes,ttl_s,sweep_interval_s}`
+   (default `dir` = per-process temp dir). Tests: `pkg/results/store_test.go`,
+   `pkg/server/results_test.go`, `externalizePayload`/`view` integration. Docs:
+   `config-file.md` (`server.results`), `development.md`. (An earlier working-tree
+   `NormalizeDefaults` was reverted back to `Mode=all`; see the note below — the
+   default is now deliberately `none`.) Updated `TestParseTengoDoc` for the
+   script.go front-matter stripping fix (Source = code, Body = whole file).
+- **Exposure default flipped to `mode: none` (minimal footprint).** Discovered
+   via `mcp-inspector`: with no `exposure:` block in the config, all 502 API tools
+   (finn 311, mortimer 132, mofli 59) were served because `NormalizeDefaults`
+   filled `Mode = all`. Per open-question 5 this is now reversed: `NormalizeDefaults`
+   (pkg/config/registration.go) fills `Mode = none` when unset, so an API whose
+   config says nothing about exposure serves **zero** operation tools until an
+   operator or agent activates them (`update_api_exposure` / a JSON
+   `exposure: {mode: all}` block). The full spec stays indexed and discoverable
+   via introspection; the call gate rejects hidden tools with the
+   `update_session_api_exposure` hint. Tests updated: `TestExposureDefaultExposesAll`
+   → `TestExposureDefaultExposesNone` (asserts nothing served, still resolvable,
+   then `mode: all` widens), and a `exposedAPI` test helper wraps registrations so
+   feature tests keep seeing tools. Docs updated (§3 defaults, config sample,
+   open-question 5).
 
 Feature flags in `pkg/config` (`server.features`): only the **web UI is beta
 and off by default**; knowledge/meta/scripts/api-registration/api-introspection/

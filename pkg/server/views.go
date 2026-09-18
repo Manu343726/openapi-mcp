@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/ckanthony/openapi-mcp/pkg/logx"
+	"github.com/ckanthony/openapi-mcp/pkg/results"
 )
 
 // This file implements the result→view wrapper: every session tool outcome is
@@ -21,16 +22,33 @@ const maxViewText = 8000
 
 // viewParams builds the structured view payload for a completed tool call.
 // Callers must not mutate the returned map.
-func (r *Registry) viewParams(toolName string, payload ToolResultPayload) map[string]interface{} {
+func (r *Registry) viewParams(connID, toolName string, payload ToolResultPayload) map[string]interface{} {
 	text := ""
 	if len(payload.Content) > 0 {
 		text = payload.Content[0].Text
 	}
+
+	// A tool result that is an externalized handle dereferences transparently:
+	// the stored payload is projected instead of the handle, and the handle is
+	// carried along so a client can re-fetch it.
+	handleID := ""
+	if st := r.ResultsStore(); st != nil {
+		if hp, ok := results.ParseHandlePayload(text); ok {
+			handleID = hp.HandleID
+			if data, err := st.Get(connID, hp.HandleID); err == nil {
+				text = string(data)
+			}
+		}
+	}
+
 	params := map[string]interface{}{
 		"tool":  toolName,
 		"kind":  r.toolKind(toolName),
 		"error": payload.IsError,
 		"text":  truncate(text, maxViewText),
+	}
+	if handleID != "" {
+		params["handle"] = handleID
 	}
 	if payload.StatusCode != 0 {
 		params["status_code"] = payload.StatusCode
@@ -111,7 +129,7 @@ func (r *Registry) emitToolResultView(connID, toolName string, payload ToolResul
 	if connID == "" {
 		return
 	}
-	params := r.viewParams(toolName, payload)
+	params := r.viewParams(connID, toolName, payload)
 	if len(args) > 0 {
 		params["args"] = args
 	}

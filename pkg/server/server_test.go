@@ -107,7 +107,7 @@ func newTestRegistryForToolSet(toolSet *mcp.ToolSet, cfg *config.Config) *Regist
 		cfg = &config.Config{}
 	}
 	reg := NewRegistry("")
-	def := config.APIDefinition{Targets: []config.TargetDefinition{cfgToTarget(cfg)}}
+	def := exposedAPI(config.APIDefinition{Targets: []config.TargetDefinition{cfgToTarget(cfg)}})
 	if cfg.APIKeyName != "" {
 		def.Auth = config.AuthConfig{Type: config.AuthAPIKey, Name: cfg.APIKeyName, In: string(cfg.APIKeyLocation)}
 	}

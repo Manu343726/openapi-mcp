@@ -20,11 +20,11 @@ func newScriptRegistry(t *testing.T, specPath string) (*Registry, string) {
 	t.Helper()
 	root := t.TempDir()
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name:      "acme",
 		Source:    specPath,
 		Knowledge: config.KnowledgeConfig{Enabled: true, Language: "en", Root: root},
-	}, false)
+	}), false)
 	require.NoError(t, err)
 	return reg, root
 }
@@ -259,7 +259,7 @@ func TestScriptRunFoldsIntoCapabilityDraft(t *testing.T) {
 	specPath := writeSpecFile(t, "spec.json", registryTestV3Spec)
 	root := t.TempDir()
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name:   "acme",
 		Source: specPath,
 		Knowledge: config.KnowledgeConfig{
@@ -268,7 +268,7 @@ func TestScriptRunFoldsIntoCapabilityDraft(t *testing.T) {
 			Root:     root,
 			Learning: config.KnowledgeLearningConfig{Enabled: true},
 		},
-	}, false)
+	}), false)
 	require.NoError(t, err)
 	writeScript(t, root, "hello.tengo", "// ---\n// kind: script\n// id: hello\n// ---\nreturn \"hi\"\n")
 	_, err = reg.LoadKnowledge("acme")
@@ -298,7 +298,7 @@ func TestPromoteSequenceToScript(t *testing.T) {
 	specPath := writeSpecFile(t, "spec.json", registryTestV3Spec)
 	root := t.TempDir()
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name:   "acme",
 		Source: specPath,
 		Knowledge: config.KnowledgeConfig{
@@ -307,7 +307,7 @@ func TestPromoteSequenceToScript(t *testing.T) {
 			Root:     root,
 			Learning: config.KnowledgeLearningConfig{Enabled: true},
 		},
-	}, false)
+	}), false)
 	require.NoError(t, err)
 	writeScript(t, root, "hello.tengo", "// ---\n// kind: script\n// id: hello\n// ---\nreturn \"hi\"\n")
 	_, err = reg.LoadKnowledge("acme")
@@ -379,7 +379,7 @@ func newLearningRegistry(t *testing.T) (*Registry, string, *httptest.Server) {
 	specPath := filepath.Join(root, "spec.json")
 	require.NoError(t, os.WriteFile(specPath, []byte(fmt.Sprintf(learningSpecTmpl, backend.URL)), 0o644))
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name:   "acme",
 		Source: specPath,
 		Knowledge: config.KnowledgeConfig{
@@ -388,7 +388,7 @@ func newLearningRegistry(t *testing.T) (*Registry, string, *httptest.Server) {
 			Root:     root,
 			Learning: config.KnowledgeLearningConfig{Enabled: true},
 		},
-	}, false)
+	}), false)
 	require.NoError(t, err)
 	_, err = reg.AddTarget("acme", config.TargetDefinition{Name: "default", BaseURL: backend.URL}, false)
 	require.NoError(t, err)
@@ -473,11 +473,11 @@ func TestRunTaskFailureIncludesPartialProgress(t *testing.T) {
 	specPath := filepath.Join(root, "spec.json")
 	require.NoError(t, os.WriteFile(specPath, []byte(fmt.Sprintf(learningSpecTmpl, backend.URL)), 0o644))
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name:      "acme",
 		Source:    specPath,
 		Knowledge: config.KnowledgeConfig{Enabled: true, Language: "en", Root: root},
-	}, false)
+	}), false)
 	require.NoError(t, err)
 	_, err = reg.AddTarget("acme", config.TargetDefinition{Name: "default", BaseURL: backend.URL}, false)
 	require.NoError(t, err)

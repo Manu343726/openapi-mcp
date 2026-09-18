@@ -1400,12 +1400,48 @@ func handleToolCallJSONRPC(connID string, req *jsonRPCRequest, reg *Registry) js
 		resultPayload = toolResultFromHTTP(params.ToolName, req.ID, httpResp, execErr)
 	}
 
+	// Externalize oversized results: store the payload text out-of-line and
+	// return a compact handle instead, so large API/script outputs do not
+	// inflate the agent's context. Handle payloads themselves and the tools
+	// that dereference them are never externalized.
+	resultPayload = reg.externalizePayload(connID, params.ToolName, resultPayload)
+
 	// --- Send Response ---
 	return jsonRPCResponse{
 		Jsonrpc: "2.0",
 		ID:      req.ID,        // Match request ID
 		Result:  resultPayload, // Use the actual result payload
 	}
+}
+
+// externalizePayload rewrites a tool result's inline text into a compact
+// results_store handle when it exceeds the configured threshold. Error
+// payloads' diagnostic text is small by construction and is also kept inline;
+// only a successful result carrying a single oversized text item is
+// externalized. Oversized views and handle-retrieval tools are left alone.
+func (r *Registry) externalizePayload(connID, toolName string, payload ToolResultPayload) ToolResultPayload {
+	if payload.IsError || toolName == ToolResultsGet || toolName == ToolView {
+		return payload
+	}
+	st := r.ResultsStore()
+	if st == nil {
+		return payload
+	}
+	if len(payload.Content) != 1 {
+		return payload
+	}
+	c := payload.Content[0]
+	if c.Type != "text" || len(c.Text) <= st.MaxInline() {
+		return payload
+	}
+	h, err := st.Store(connID, toolName, r.toolKind(toolName), []byte(c.Text))
+	if err != nil {
+		serverLog.Error("failed to externalize result; inlining", "tool", toolName, "error", err)
+		return payload
+	}
+	serverLog.Debug("externalized large result", "tool", toolName, "handle", h.ID, "bytes", h.Bytes)
+	payload.Content = []ToolResultContent{{Type: "text", Text: st.HandlePayloadText(h)}}
+	return payload
 }
 
 // executeRegisteredTool resolves a fully qualified tool name to its API entry,

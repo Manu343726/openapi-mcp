@@ -69,7 +69,7 @@ const introspectSpec = `{
 
 func TestToolDescriptionReflectsEndpoint(t *testing.T) {
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{Name: "orders", Spec: introspectSpec}, false)
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "orders", Spec: introspectSpec}), false)
 
 	// tools/list exposes the full (prefixed) name; the description must embed
 	// the endpoint and the tool name (self-referencing).
@@ -87,36 +87,71 @@ func TestToolDescriptionReflectsEndpoint(t *testing.T) {
 	assert.Contains(t, listTool.Description, "page (query, optional): integer")
 }
 
-func TestDescribeOpenapiAPI(t *testing.T) {
+func TestGetAPIInfo(t *testing.T) {
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "orders",
 		Spec: introspectSpec,
 		Auth: config.AuthConfig{Type: config.AuthAPIKey, In: "header", Name: "X-API-Key"},
 		Targets: []config.TargetDefinition{
 			{Name: "prod", BaseURL: "https://orders.example.com/v2", APIKey: "k"},
 		},
-	}, false)
+		ActiveTarget: "prod",
+	}), false)
 
-	res := reg.runManagementTool("", ToolDescribeAPI, map[string]interface{}{"api": "orders"})
+	res := reg.runManagementTool("", ToolGetAPIInfo, map[string]interface{}{"api": "orders"})
 	require.True(t, res.ok, res.text)
 
-	var view apiDocView
+	var view struct {
+		Info struct {
+			Name    string   `json:"name"`
+			Title   string   `json:"title"`
+			Version string   `json:"version"`
+			Servers []string `json:"servers"`
+		} `json:"info"`
+		Auth   config.AuthConfig `json:"auth"`
+		Config struct {
+			ToolCount int `json:"tool_count"`
+		} `json:"config"`
+		Targets []struct {
+			Name    string `json:"name"`
+			BaseURL string `json:"base_url"`
+		} `json:"targets"`
+		Active string `json:"active_target"`
+	}
 	require.NoError(t, json.Unmarshal([]byte(res.text), &view))
 	assert.Equal(t, "Orders API", view.Info.Title)
 	assert.Equal(t, "2.3.0", view.Info.Version)
 	assert.Equal(t, "https://orders.example.com/v2", view.Info.Servers[0])
 	assert.Equal(t, config.AuthAPIKey, view.Auth.Type)
+	require.Len(t, view.Targets, 1)
+	assert.Equal(t, "prod", view.Targets[0].Name)
+	assert.Equal(t, "prod", view.Active)
+	assert.Equal(t, 2, view.Config.ToolCount)
+}
+
+func TestListAPIEndpoints(t *testing.T) {
+	reg := NewRegistry("")
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "orders", Spec: introspectSpec}), false)
+
+	res := reg.runManagementTool("", ToolListEndpoints, map[string]interface{}{"api": "orders"})
+	require.True(t, res.ok, res.text)
+	var v struct {
+		Endpoints []endpointView `json:"endpoints"`
+		Total     int            `json:"total"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(res.text), &v))
+	require.Len(t, v.Endpoints, 2)
+	assert.Equal(t, 2, v.Total)
 
 	// Endpoint->tool mapping (self-referencing at the REST + tool levels).
-	require.Len(t, view.Endpoints, 2)
 	var listEp, createEp *endpointView
-	for i := range view.Endpoints {
-		if view.Endpoints[i].OperationID == "listOrders" {
-			listEp = &view.Endpoints[i]
+	for i := range v.Endpoints {
+		if v.Endpoints[i].OperationID == "listOrders" {
+			listEp = &v.Endpoints[i]
 		}
-		if view.Endpoints[i].OperationID == "createOrder" {
-			createEp = &view.Endpoints[i]
+		if v.Endpoints[i].OperationID == "createOrder" {
+			createEp = &v.Endpoints[i]
 		}
 	}
 	require.NotNil(t, listEp)
@@ -131,18 +166,14 @@ func TestDescribeOpenapiAPI(t *testing.T) {
 	for _, tt := range reg.Tools() {
 		names[tt.Name] = true
 	}
-	for _, ep := range view.Endpoints {
+	for _, ep := range v.Endpoints {
 		assert.True(t, names[ep.ToolName], "endpoint %s references tool %s which must exist", ep.OperationID, ep.ToolName)
 	}
-
-	// DTO schemas are present.
-	assert.Contains(t, view.Schemas, "Order")
-	assert.Contains(t, view.Schemas, "OrderInput")
 }
 
 func TestGetApiOperation(t *testing.T) {
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{Name: "orders", Spec: introspectSpec}, false)
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "orders", Spec: introspectSpec}), false)
 
 	// By bare operationId.
 	res := reg.runManagementTool("", ToolGetOperation, map[string]interface{}{"api": "orders", "operation": "createOrder"})
@@ -183,7 +214,7 @@ func TestGetApiOperation(t *testing.T) {
 
 func TestListAPISchemas(t *testing.T) {
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{Name: "orders", Spec: introspectSpec}, false)
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "orders", Spec: introspectSpec}), false)
 
 	// Compact list.
 	res := reg.runManagementTool("", ToolListSchemas, map[string]interface{}{"api": "orders"})
@@ -239,15 +270,25 @@ func TestIntrospectionV2Spec(t *testing.T) {
 	  }
 	}`
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{Name: "legacy", Spec: v2spec}, false)
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "legacy", Spec: v2spec}), false)
 
-	res := reg.runManagementTool("", ToolDescribeAPI, map[string]interface{}{"api": "legacy"})
+	res := reg.runManagementTool("", ToolGetAPIInfo, map[string]interface{}{"api": "legacy"})
 	require.True(t, res.ok, res.text)
-	var view apiDocView
-	require.NoError(t, json.Unmarshal([]byte(res.text), &view))
-	assert.Equal(t, "Legacy API", view.Info.Title)
-	assert.Contains(t, view.Info.Servers, "https://legacy.example.com/v1")
-	assert.Contains(t, view.Schemas, "Item")
+	var info struct {
+		Info struct {
+			Title   string   `json:"title"`
+			Servers []string `json:"servers"`
+		} `json:"info"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(res.text), &info))
+	assert.Equal(t, "Legacy API", info.Info.Title)
+	assert.Contains(t, info.Info.Servers, "https://legacy.example.com/v1")
+
+	res = reg.runManagementTool("", ToolListSchemas, map[string]interface{}{"api": "legacy"})
+	require.True(t, res.ok, res.text)
+	var schemas map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(res.text), &schemas))
+	assert.Contains(t, schemas["schemas"].(map[string]interface{}), "Item")
 
 	res = reg.runManagementTool("", ToolGetOperation, map[string]interface{}{"api": "legacy", "operation": "listItems"})
 	require.True(t, res.ok, res.text)
@@ -283,7 +324,7 @@ func TestIntrospectionV2Spec(t *testing.T) {
 }
 
 func TestIntrospectionThroughHTTPHandler(t *testing.T) {
-	// Exercise describe_openapi_api end-to-end through the MCP POST path.
+	// Exercise the introspection tools end-to-end through the MCP POST path.
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{}`)
 	}))
@@ -295,7 +336,8 @@ func TestIntrospectionThroughHTTPHandler(t *testing.T) {
 
 	// The management tools are present in tools/list.
 	names := toolNames(reg.Tools())
-	assert.Contains(t, names, ToolDescribeAPI)
+	assert.Contains(t, names, ToolGetAPIInfo)
+	assert.Contains(t, names, ToolListEndpoints)
 	assert.Contains(t, names, ToolGetOperation)
 	assert.Contains(t, names, ToolListSchemas)
 }
@@ -316,18 +358,19 @@ func TestIntrospectionExternalRefsNoPanic(t *testing.T) {
 	  }}
 	}`
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{Name: "ext", Spec: extSpec}, false)
-	res := reg.runManagementTool("", ToolDescribeAPI, map[string]interface{}{"api": "ext"})
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "ext", Spec: extSpec}), false)
+	res := reg.runManagementTool("", ToolListSchemas, map[string]interface{}{"api": "ext"})
 	require.True(t, res.ok, res.text)
-	var view apiDocView
-	require.NoError(t, json.Unmarshal([]byte(res.text), &view))
-	assert.Contains(t, view.Schemas, "Inner")
-	assert.Contains(t, view.Schemas, "Wrapper")
+	var schemas map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(res.text), &schemas))
+	ss := schemas["schemas"].(map[string]interface{})
+	assert.Contains(t, ss, "Inner")
+	assert.Contains(t, ss, "Wrapper")
 }
 
 func TestSearchOperations(t *testing.T) {
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{Name: "orders", Spec: introspectSpec}, false)
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "orders", Spec: introspectSpec}), false)
 	res := reg.runManagementTool("", ToolSearchOperation, map[string]interface{}{"api": "orders", "query": "create"})
 	require.True(t, res.ok, res.text)
 	var v struct {
@@ -347,25 +390,42 @@ func TestSearchOperations(t *testing.T) {
 	assert.Len(t, v2.Matches, 1)
 }
 
-func TestDescribeIncludeFilter(t *testing.T) {
+func TestListEndpointsFilters(t *testing.T) {
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{Name: "orders", Spec: introspectSpec}, false)
-	res := reg.runManagementTool("", ToolDescribeAPI, map[string]interface{}{"api": "orders", "include": []interface{}{"info", "endpoints"}, "schema_detail": "compact"})
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "orders", Spec: introspectSpec}), false)
+
+	// search narrows by operationId/path/summary substring.
+	res := reg.runManagementTool("", ToolListEndpoints, map[string]interface{}{"api": "orders", "search": "create"})
 	require.True(t, res.ok, res.text)
-	var v apiDocView
+	var v struct {
+		Total     int            `json:"total"`
+		Endpoints []endpointView `json:"endpoints"`
+	}
 	require.NoError(t, json.Unmarshal([]byte(res.text), &v))
-	assert.NotEmpty(t, v.Info.Title)
-	assert.Empty(t, v.Schemas)  // schemas not included
-	assert.Len(t, v.Targets, 0) // targets not included
+	assert.Equal(t, 1, v.Total)
+	assert.Equal(t, "orders__createOrder", v.Endpoints[0].ToolName)
+
+	// method filter.
+	res = reg.runManagementTool("", ToolListEndpoints, map[string]interface{}{"api": "orders", "method": "GET"})
+	require.True(t, res.ok, res.text)
+	require.NoError(t, json.Unmarshal([]byte(res.text), &v))
+	assert.Equal(t, 1, v.Total)
+	assert.Equal(t, "GET", v.Endpoints[0].Method)
+
+	// No matches is not an error.
+	res = reg.runManagementTool("", ToolListEndpoints, map[string]interface{}{"api": "orders", "search": "zzz"})
+	require.True(t, res.ok, res.text)
+	require.NoError(t, json.Unmarshal([]byte(res.text), &v))
+	assert.Equal(t, 0, v.Total)
 }
 
 func TestExportConfig(t *testing.T) {
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "orders", Spec: introspectSpec,
 		ActiveTarget: "prod",
 		Targets:      []config.TargetDefinition{{Name: "prod", BaseURL: "https://prod.example.com"}},
-	}, false)
+	}), false)
 	res := reg.runManagementTool("", ToolExportConfig, map[string]interface{}{"api": "orders"})
 	require.True(t, res.ok, res.text)
 	assert.Contains(t, res.text, `"name": "orders"`)
@@ -379,10 +439,10 @@ func TestTestAPITarget(t *testing.T) {
 	defer backend.Close()
 
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "x", Spec: registryTestV3Spec,
 		Targets: []config.TargetDefinition{{Name: "local", BaseURL: backend.URL}},
-	}, false)
+	}), false)
 	res := reg.runManagementTool("", ToolTestTarget, map[string]interface{}{"api": "x", "target": "local"})
 	require.True(t, res.ok, res.text)
 	assert.Contains(t, res.text, "reachable")
@@ -394,10 +454,10 @@ func TestTestAPITarget(t *testing.T) {
 
 func TestPreviewAPICall(t *testing.T) {
 	reg := NewRegistry("")
-	reg.RegisterAPI(config.APIDefinition{
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "orders", Spec: introspectSpec,
 		Targets: []config.TargetDefinition{{Name: "local", BaseURL: "https://orders.example.com/v2"}},
-	}, false)
+	}), false)
 	res := reg.runManagementTool("", ToolPreviewCall, map[string]interface{}{
 		"operation": "orders__listOrders",
 		"arguments": map[string]interface{}{"page": "2", "target": "local"},
@@ -405,4 +465,122 @@ func TestPreviewAPICall(t *testing.T) {
 	require.True(t, res.ok, res.text)
 	assert.Contains(t, res.text, `"method": "GET"`)
 	assert.Contains(t, res.text, "Dry-run")
+}
+
+func TestCallAPIEndpoint(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/orders" {
+			if r.Method == http.MethodPost {
+				var in struct {
+					Item string `json:"item"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&in)
+				fmt.Fprintf(w, `{"created":"%s"}`, in.Item)
+				return
+			}
+			fmt.Fprintf(w, `{"orders":[],"page":%q}`, r.URL.Query().Get("page"))
+			return
+		}
+		w.WriteHeader(404)
+		fmt.Fprint(w, `{"error":"not found"}`)
+	}))
+	defer backend.Close()
+
+	reg := NewRegistry("")
+	// No exposure configured: mode none, zero ops exposed. call_api_endpoint
+	// must call the operation anyway (bypasses the exposure gate).
+	_, err := reg.RegisterAPI(config.APIDefinition{
+		Name: "orders", Spec: introspectSpec,
+		Targets: []config.TargetDefinition{{Name: "local", BaseURL: backend.URL}},
+	}, false)
+	require.NoError(t, err)
+	assert.NotContains(t, toolNames(reg.Tools()), "orders__listOrders")
+
+	// By bare operationId.
+	res := reg.runManagementTool("", ToolCallEndpoint, map[string]interface{}{
+		"api": "orders", "operation": "listOrders",
+		"arguments": map[string]interface{}{"page": "2", "target": "local"},
+	})
+	require.True(t, res.ok, res.text)
+	assert.Contains(t, res.text, `"page":"2"`)
+
+	// By full tool name with a body argument.
+	res = reg.runManagementTool("", ToolCallEndpoint, map[string]interface{}{
+		"api": "orders", "operation": "orders__createOrder",
+		"arguments": map[string]interface{}{"item": "chair", "target": "local"},
+	})
+	require.True(t, res.ok, res.text)
+	assert.Contains(t, res.text, `"created":"chair"`)
+
+	// Unknown operation -> error.
+	res = reg.runManagementTool("", ToolCallEndpoint, map[string]interface{}{"api": "orders", "operation": "nopeOp"})
+	assert.False(t, res.ok)
+	assert.Contains(t, res.text, "no operation")
+
+	// Unknown API -> error.
+	res = reg.runManagementTool("", ToolCallEndpoint, map[string]interface{}{"api": "nope", "operation": "listOrders"})
+	assert.False(t, res.ok)
+
+	// Full name whose API does not match the api argument -> error.
+	res = reg.runManagementTool("", ToolCallEndpoint, map[string]interface{}{"api": "other", "operation": "orders__listOrders"})
+	assert.False(t, res.ok)
+	assert.Contains(t, res.text, "belongs to API")
+}
+
+func TestCallAPIEndpointRespectsAllowSet(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{}`)
+	}))
+	defer backend.Close()
+
+	// The operator excluded getArchive via config: the allow-set is a HARD
+	// boundary, so call_api_endpoint must refuse it even though exposure is
+	// bypassed. listOrders (not excluded) still works.
+	reg := NewRegistry("")
+	_, err := reg.RegisterAPI(config.APIDefinition{
+		Name:       "orders",
+		Spec:       introspectSpec,
+		ExcludeOps: []string{"createOrder"},
+		Targets:    []config.TargetDefinition{{Name: "local", BaseURL: backend.URL}},
+	}, false)
+	require.NoError(t, err)
+
+	res := reg.runManagementTool("", ToolCallEndpoint, map[string]interface{}{
+		"api": "orders", "operation": "createOrder", "arguments": map[string]interface{}{"target": "local"},
+	})
+	assert.False(t, res.ok)
+	assert.Contains(t, res.text, "allow-set")
+
+	res = reg.runManagementTool("", ToolCallEndpoint, map[string]interface{}{
+		"api": "orders", "operation": "listOrders", "arguments": map[string]interface{}{"target": "local"},
+	})
+	require.True(t, res.ok, res.text)
+}
+
+func TestListOpenAPIsCompactByDefault(t *testing.T) {
+	reg := NewRegistry("")
+	reg.RegisterAPI(exposedAPI(config.APIDefinition{
+		Name: "orders", Spec: introspectSpec,
+		Targets: []config.TargetDefinition{{Name: "local", BaseURL: "https://orders.example.com/v2"}},
+	}), false)
+
+	// Default listing is a compact summary: metadata + counts, no tool list.
+	res := reg.runManagementTool("", ToolListAPIs, map[string]interface{}{})
+	require.True(t, res.ok, res.text)
+	assert.NotContains(t, res.text, `"tools"`)
+	var rows []map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(res.text), &rows))
+	require.Len(t, rows, 1)
+	assert.Equal(t, "orders", rows[0]["name"])
+	assert.EqualValues(t, 2, rows[0]["tool_count"])
+	assert.Equal(t, "local", rows[0]["active_target"])
+
+	// Opt in to the full tool names per API.
+	res = reg.runManagementTool("", ToolListAPIs, map[string]interface{}{"include": []interface{}{"tools"}})
+	require.True(t, res.ok, res.text)
+	require.NoError(t, json.Unmarshal([]byte(res.text), &rows))
+	tools, ok := rows[0]["tools"].([]interface{})
+	require.True(t, ok, "include=[tools] must add the tool list")
+	assert.Len(t, tools, 2)
+	assert.Contains(t, tools, "orders__listOrders")
 }

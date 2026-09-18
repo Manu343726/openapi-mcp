@@ -82,11 +82,11 @@ func specChangedLog(n jsonRPCResponse) bool {
 func TestMonitoringNotifyOnChange(t *testing.T) {
 	path := writeSpecFile(t, "spec.json", registryTestV3Spec)
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "weather", Source: path,
 		Monitoring: config.MonitorConfig{Enabled: true},
 		Targets:    []config.TargetDefinition{{Name: "prod", BaseURL: "https://api"}},
-	}, false)
+	}), false)
 	require.NoError(t, err)
 	t.Cleanup(reg.StopMonitoring)
 
@@ -123,11 +123,11 @@ func TestMonitoringNotifyOnChange(t *testing.T) {
 func TestMonitoringAutoReloadOnChange(t *testing.T) {
 	path := writeSpecFile(t, "spec.json", registryTestV3Spec)
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "weather", Source: path,
 		Monitoring: config.MonitorConfig{Enabled: true, AutoReload: true},
 		Targets:    []config.TargetDefinition{{Name: "prod", BaseURL: "https://api"}},
-	}, false)
+	}), false)
 	require.NoError(t, err)
 	t.Cleanup(reg.StopMonitoring)
 
@@ -174,7 +174,7 @@ func TestMonitoringAutoReloadOnChange(t *testing.T) {
 func TestMonitoringDisabledNoNotify(t *testing.T) {
 	path := writeSpecFile(t, "spec.json", registryTestV3Spec)
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{Name: "weather", Source: path}, false)
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "weather", Source: path}), false)
 	require.NoError(t, err)
 	assert.Nil(t, reg.monitorCtx, "watcher must not start when monitoring is disabled")
 
@@ -193,7 +193,7 @@ func TestMonitoringLifecycleAndNormalization(t *testing.T) {
 	// auto_reload alone implies enabled (monitoring).
 	path := writeSpecFile(t, "spec.json", registryTestV3Spec)
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{Name: "weather", Source: path, Monitoring: config.MonitorConfig{AutoReload: true}}, false)
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{Name: "weather", Source: path, Monitoring: config.MonitorConfig{AutoReload: true}}), false)
 	require.NoError(t, err)
 
 	view, err := reg.GetApiEntryView("weather")

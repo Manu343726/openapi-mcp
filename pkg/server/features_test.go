@@ -153,7 +153,7 @@ func TestFeatureGatedCallRejection(t *testing.T) {
 
 	// A gated group that is not knowledge (introspection) errors the same way.
 	setFeatureFlags(t, reg, func(f *config.FeaturesConfig) { f.APIIntrospection = boolP(false) })
-	res = reg.runManagementTool("", ToolDescribeAPI, map[string]interface{}{"api": "nope"})
+	res = reg.runManagementTool("", ToolGetAPIInfo, map[string]interface{}{"api": "nope"})
 	require.False(t, res.ok)
 	assert.Contains(t, res.text, "api_introspection")
 

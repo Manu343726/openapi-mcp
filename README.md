@@ -65,7 +65,7 @@ Register/unregister APIs and their targets on demand through MCP management tool
 |------|---------|
 | `register_openapi_api` | Register an API from a spec URL, path, or inline JSON/YAML. `update=true` re-registers while **preserving existing targets and the active target** (no data loss). |
 | `unregister_openapi_api` | Remove an API. |
-| `list_openapi_apis` | List APIs, targets, active target, tools. |
+| `list_openapi_apis` | List APIs with a compact summary (source/title, tool_count, exposed_tools, mode, targets). Pass `include:["tools"]` to also get the full per-API tool names. |
 | `register_api_target` / `unregister_api_target` / `list_api_targets` | Manage the servers implementing an API. |
 | `set_active_api_target` / `clear_active_api_target` / `get_active_api_target` | Manage the per-API default target. |
 | `set/clear/get_session_active_api_target` | Per-connection active target override (auto-cleared on disconnect). |
@@ -79,11 +79,13 @@ Registrations are persisted to a YAML config file (single file for servers + API
 
 | Tool | Purpose |
 |------|---------|
-| `describe_openapi_api` | Full API documentation with `include` (sections), `search` (endpoint filter) and `schema_detail` (compact/full) to control payload size. |
+| `get_api_info` | Compact API metadata (info, servers, auth, targets) — small and fixed-size regardless of API size. |
+| `list_api_endpoints` | Paginated endpoint index: `operation_id`, method, path, summary, tags and exact `tool_name`; optional `search`/`method` filters, `limit`/`offset`. |
 | `get_api_operation` | Detailed docs for one endpoint (parameters, request/response schemas); `examples` option. |
 | `list_api_schemas` | List/expand DTO schemas with `name`, `search`, `limit`, `offset`, `expand`. |
 | `search_openapi_operations` | Find endpoints by keyword (operationId/path/summary) + optional method filter. |
 | `preview_api_call` | **Dry-run**: build the literal HTTP request a tool call would send (method, URL, headers, cookies, body, resolved target) without executing it. |
+| `call_api_endpoint` | Call any registered operation by `api` + `operationId` (or full tool name) with an `arguments` map — one tool for everything, and it is **never hidden by exposure** (reaches ops even in `mode: none`). |
 
 Every exposed tool's description is **self-describing**: it embeds the underlying endpoint (method + path), the operation and parameter requirements, and the fully qualified tool name — so an agent can use the API from the tool surface alone. Endpoint documentation references the exact MCP tool to call, mapping REST ↔ MCP tools bidirectionally. Handles **external `$ref` includes** (e.g. `schemas.yaml#/...`), resolving and indexing DTOs from multi-file specs. See [`docs/api-introspection.md`](docs/api-introspection.md).
 
@@ -107,7 +109,7 @@ The MCP reads the API's OpenAPI security schemes (`apiKey`, `http` basic/bearer,
 
 - **Semantic knowledge base:** a per-API and global (`_meta`) Markdown library of glossary, endpoint, schema, capability (`run_task`) and view/dashboard documents; git- or locally-backed, with session overlays and learning.
 - **Executable scripts:** `kind: script` docs (tengo) are surfaced as MCP tools under a sandbox (`mcp`/`os`/`exec`/`fs`/`http` modules are default-deny behind declared permissions and operator allowlists). The `mcp` module lets a script chain other tools, and `knowledge_promote_script` turns a recorded session sequence into a reusable script.
-- **Dynamic exposure:** slim the served tool footprint per API or per session (`update_api_exposure` / `update_session_api_exposure`); include/exclude config is the hard allow-set.
+- **Dynamic exposure:** slim the served tool footprint per API or per session (`update_api_exposure` / `update_session_api_exposure`); include/exclude config is the hard allow-set. `call_api_endpoint` is the single always-on tool that reaches any registered operation by `api` + `operationId` regardless of exposure mode, so agents keep full functionality even with a minimal footprint.
 - **Interactive web UI:** a pre-built shell at `/ui` (`/ui/manifest`, `/ui/chat`, `/ui/events`) mirrors the live registry for the browser, with one isolated MCP session per tab. Enable/gate it via `server.ui` (`enabled`, `session_header`, `max_sessions`, `token_env`).
 
 ### Deployment & configuration
@@ -265,12 +267,13 @@ connection target a different server without affecting others.
 ### Introspecting / using the tools
 
 ```text
-describe_openapi_api   { api: "weather" }                    # full docs
-describe_openapi_api   { api: "weather", include: ["info","endpoints"], schema_detail: "compact" }
+get_api_info            { api: "weather" }                   # compact metadata (small, fixed size)
+list_api_endpoints      { api: "weather", limit: 20 }        # paginated endpoint index (+ total/has_more)
 search_openapi_operations { api: "weather", query: "current" } # find endpoint -> exact tool
 get_api_operation       { api: "weather", operation: "getCurrent" }
 list_api_schemas        { api: "weather", search: "Forecast", expand: true }
 preview_api_call        { operation: "weather__getCurrent", arguments: { city: "Madrid", target: "prod" } } # dry-run, no request sent
+call_api_endpoint       { api: "weather", operation: "getCurrent", arguments: { city: "Madrid", target: "prod" } } # execute, reachable even in mode:none
 test_api_target         { api: "weather", target: "prod" }       # reachability probe
 ```
 

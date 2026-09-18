@@ -146,12 +146,12 @@ func TestSessionExposureWidenWithinAllowSet(t *testing.T) {
 
 func TestExposureAllowSetIsHardBoundary(t *testing.T) {
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name:       "weather",
 		Spec:       exposureTaggedSpec,
 		ExcludeOps: []string{"getArchive"},
 		Targets:    []config.TargetDefinition{{Name: "default", BaseURL: "https://api.example.com"}},
-	}, false)
+	}), false)
 	require.NoError(t, err)
 
 	// getArchive is absent from the allow-set: it is never served...
@@ -280,7 +280,7 @@ func TestExposureIntrospectionShowsSessionView(t *testing.T) {
 
 func TestExposureRegisterAPIFromConfig(t *testing.T) {
 	reg := NewRegistry("")
-	_, err := reg.RegisterAPI(config.APIDefinition{
+	_, err := reg.RegisterAPI(exposedAPI(config.APIDefinition{
 		Name: "weather",
 		Spec: exposureTaggedSpec,
 		Exposure: config.ExposureConfig{
@@ -288,7 +288,7 @@ func TestExposureRegisterAPIFromConfig(t *testing.T) {
 			ActiveTags: []string{"forecast"},
 		},
 		Targets: []config.TargetDefinition{{Name: "default", BaseURL: "https://api.example.com"}},
-	}, false)
+	}), false)
 	require.NoError(t, err)
 
 	names := toolNames(reg.Tools())

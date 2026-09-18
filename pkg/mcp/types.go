@@ -114,7 +114,7 @@ type Schema struct {
 //
 // ApiDoc is a normalized, client-friendly description of a registered API
 // derived from the OpenAPI/Swagger spec. It powers the introspection
-// management tools (describe_openapi_api, get_api_operation,
+// management tools (get_api_info, list_api_endpoints, get_api_operation,
 // list_api_schemas) so AI agents can understand an API and how to use it
 // without reading the raw spec.
 

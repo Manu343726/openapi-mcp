@@ -19,7 +19,7 @@ func TestViewParamsTable(t *testing.T) {
 	specPath := writeSpecFile(t, "spec.json", registryTestV3Spec)
 	reg, _ := newScriptRegistry(t, specPath)
 
-	params := reg.viewParams("acme__getCurrent", payloadOf(`[{"a":1,"b":"x"},{"a":2,"b":"y"}]`, false))
+	params := reg.viewParams("", "acme__getCurrent", payloadOf(`[{"a":1,"b":"x"},{"a":2,"b":"y"}]`, false))
 	assert.Equal(t, "table", params["layout"])
 	assert.Equal(t, "operation", params["kind"])
 	assert.Equal(t, 2, params["count"])
@@ -31,20 +31,20 @@ func TestViewParamsTable(t *testing.T) {
 
 func TestViewParamsMarkdownFallback(t *testing.T) {
 	reg := NewRegistry("")
-	params := reg.viewParams("some_tool", payloadOf("not json", false))
+	params := reg.viewParams("", "some_tool", payloadOf("not json", false))
 	assert.Equal(t, "markdown", params["layout"])
 	assert.Equal(t, "unknown", params["kind"])
 	assert.Equal(t, "not json", params["text"])
 	assert.Equal(t, false, params["result"], "markdown feedback is not a result")
 
-	obj := reg.viewParams("some_tool", payloadOf(`{"k":"v"}`, false))
+	obj := reg.viewParams("", "some_tool", payloadOf(`{"k":"v"}`, false))
 	assert.Equal(t, "list", obj["layout"])
 	assert.Equal(t, true, obj["result"], "list layout is a result")
 }
 
 func TestViewParamsErrorIsNotification(t *testing.T) {
 	reg := NewRegistry("")
-	params := reg.viewParams("some_tool", payloadOf("something broke", true))
+	params := reg.viewParams("", "some_tool", payloadOf("something broke", true))
 	assert.Equal(t, true, params["error"])
 	assert.Equal(t, false, params["result"], "errors are notifications, not results")
 }
@@ -52,7 +52,7 @@ func TestViewParamsErrorIsNotification(t *testing.T) {
 func TestViewParamsPassthroughForViewTool(t *testing.T) {
 	reg := NewRegistry("")
 	render := `{"view_id":"leads","layout":"table","columns":["id"],"rows":[{"id":1}],"count":1}`
-	params := reg.viewParams(ToolView, payloadOf(render, false))
+	params := reg.viewParams("", ToolView, payloadOf(render, false))
 	assert.Equal(t, "view", params["kind"])
 	assert.Equal(t, "table", params["layout"])
 	assert.EqualValues(t, 1, params["count"])

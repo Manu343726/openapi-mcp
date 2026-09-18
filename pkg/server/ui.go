@@ -126,7 +126,7 @@ func (b *UIBridge) handleChat(w http.ResponseWriter, r *http.Request) {
 			Content: []ToolResultContent{{Type: "text", Text: text}},
 			IsError: callErr != nil,
 		}
-		view := b.reg.viewParams(tool, payload)
+		view := b.reg.viewParams(sess.connID, tool, payload)
 		resp["tool"] = tool
 		resp["text"] = text
 		resp["view"] = view

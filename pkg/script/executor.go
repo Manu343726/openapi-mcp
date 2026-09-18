@@ -25,6 +25,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -237,10 +239,109 @@ func (e *Executor) compile(src string, host Host) (*tengo.Compiled, error) {
 	return c, nil
 }
 
-// wrapSource turns the script body into an immediately-invoked function whose
-// return value is captured in resultVar.
+// wrapSource transforms the script source to extract imports (required at
+// module scope) and capture the last expression as a return value.
+// In Tengo, if there are imports, we extract them to module scope and then
+// convert return statements to assignments to the result variable.
+// If there are no imports, we wrap in a function (for backwards compatibility).
 func wrapSource(src string) string {
-	return resultVar + " := func() {\n" + src + "\n}()\n"
+	// Regex to match individual import statements: identifier := import(...)
+	importStmtRegex := regexp.MustCompile(`(\w+\s*:=\s*import\s*\([^)]*\))`)
+	
+	lines := strings.Split(src, "\n")
+	var imports []string
+	var nonImports []string
+	
+	// Process each line
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		
+		// Skip empty lines and comments
+		if trimmed == "" || strings.HasPrefix(trimmed, "//") {
+			nonImports = append(nonImports, line)
+			continue
+		}
+		
+		// Find all import statements in this line
+		matches := importStmtRegex.FindAllStringIndex(line, -1)
+		if len(matches) == 0 {
+			// No imports on this line
+			nonImports = append(nonImports, line)
+			continue
+		}
+		
+		// If there are imports on this line, we need to carefully separate them
+		// from any other code. Split by semicolons and process each statement.
+		statements := strings.Split(line, ";")
+		var lineImports []string
+		var otherStatements []string
+		
+		for _, stmt := range statements {
+			stmt = strings.TrimSpace(stmt)
+			if stmt == "" {
+				continue
+			}
+			
+			// Check if this statement is an import
+			if importStmtRegex.MatchString(stmt) {
+				lineImports = append(lineImports, stmt)
+			} else {
+				otherStatements = append(otherStatements, stmt)
+			}
+		}
+		
+		// Add all imports for this line
+		imports = append(imports, lineImports...)
+		
+		// Add other statements as non-import code
+		if len(otherStatements) > 0 {
+			nonImports = append(nonImports, strings.Join(otherStatements, "; "))
+		}
+	}
+	
+	// If there are imports, put them at module scope and don't wrap in a function.
+	// Convert "return X" statements to "resultVar = X" assignments.
+	if len(imports) > 0 {
+		var result strings.Builder
+		
+		// Initialize the result variable at the start, before any code that might use it
+		// Use empty string as the default value
+		result.WriteString(resultVar)
+		result.WriteString(" := \"\"\n")
+		
+		// Write imports at module scope
+		for _, imp := range imports {
+			result.WriteString(imp)
+			result.WriteString("\n")
+		}
+		
+		// Process non-import lines and convert return statements
+		for _, line := range nonImports {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "return ") {
+				// Replace "return X" with "resultVar = X"
+				rest := trimmed[7:] // Remove "return "
+				result.WriteString(resultVar)
+				result.WriteString(" = ")
+				result.WriteString(rest)
+				result.WriteString("\n")
+			} else {
+				result.WriteString(line)
+				result.WriteString("\n")
+			}
+		}
+		
+		return result.String()
+	}
+	
+	// No imports: use the original function wrapper approach
+	var result strings.Builder
+	result.WriteString(resultVar)
+	result.WriteString(" := func() {\n")
+	result.WriteString(strings.Join(nonImports, "\n"))
+	result.WriteString("\n}()\n")
+	
+	return result.String()
 }
 
 func sourceHash(src string) string {

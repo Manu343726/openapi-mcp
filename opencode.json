@@ -3,7 +3,7 @@
   "mcp": {
     "openapi-mcp": {
       "type": "remote",
-      "url": "http://localhost:8080/mcp",
+      "url": "http://localhost:8086/mcp",
       "enabled": true
     },
     "mcp-debugger": {

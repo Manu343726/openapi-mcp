@@ -436,20 +436,24 @@ func (a *APIDefinition) Target(name string) (TargetDefinition, bool) {
 // Exposure mode values for the dynamic tool-footprint runtime projection.
 const (
 	// ExposureModeAll serves every operation that passes the API's allow-set,
-	// minus the disabled lists. It is the default and the backward-compatible
-	// behavior for existing registrations.
+	// minus the disabled lists. Operators opt into this explicitly.
 	ExposureModeAll = "all"
 	// ExposureModeNone serves only the operations explicitly force-on through
-	// the active lists ("slim footprint" bootstrap). The full spec stays indexed
-	// and discoverable regardless.
+	// the active lists ("slim footprint" bootstrap). It is the default for
+	// registrations that set no exposure, so API tools are not served until an
+	// operator or agent activates them. The full spec stays indexed and
+	// discoverable regardless.
 	ExposureModeNone = "none"
 )
 
 // ExposureConfig is the runtime footprint projection of an API's operations:
-// which of its (allowed) tools are actually served to sessions. The allow-set
-// (IncludeTags/ExcludeTags/IncludeOps/ExcludeOps) is the hard boundary; exposure
-// only narrows/widens within it. A session override can deviate from this global
-// baseline for its own session only (see Registry.sessionExposure).
+// which of its (allowed) tools are served to sessions. It controls prompt
+// footprint, NOT authorization: the agent itself can change exposure, so it
+// never gates what may be called (call_api_endpoint reaches any operation
+// regardless of mode). The allow-set (IncludeTags/ExcludeTags/IncludeOps/
+// ExcludeOps) is the only hard boundary; exposure only narrows/widens within
+// it. A session override can deviate from this global baseline for its own
+// session only (see Registry.sessionExposure).
 type ExposureConfig struct {
 	// Active toggles the whole API. When explicitly false, none of its
 	// operation tools are served (the API stays registered; targets, auth and
@@ -481,19 +485,22 @@ func (e ExposureConfig) ActiveEnabled() bool {
 func boolPtr(v bool) *bool { return &v }
 
 // IsZero reports whether no exposure override is configured (so the caller can
-// fall back to the defaults Active=true, Mode=all).
+// fall back to the defaults Active=true, Mode=none).
 func (e ExposureConfig) IsZero() bool {
 	return e.Active == nil && e.Mode == "" && len(e.ActiveTags) == 0 && len(e.ActiveOps) == 0 && len(e.DisabledTags) == 0 && len(e.DisabledOps) == 0
 }
 
-// NormalizeDefaults fills in the default exposure (Active=true, Mode=all) for an
-// all-zero config and validates the mode value. It returns a copy; the receiver
-// is not mutated.
+// NormalizeDefaults fills in the default exposure (Active=true, Mode=none) for
+// an all-zero config and validates the mode value. Mode defaults to "none" so an
+// operator has to explicitly opt into exposing an API's tools; "none" serves
+// the minimal footprint (only the active lists), which is also the safe default
+// for registrations that say nothing about exposure. It returns a copy; the
+// receiver is not mutated.
 func (e ExposureConfig) NormalizeDefaults() ExposureConfig {
 	if e.Mode == "" {
-		e.Mode = ExposureModeAll
+		e.Mode = ExposureModeNone
 	} else if e.Mode != ExposureModeAll && e.Mode != ExposureModeNone {
-		e.Mode = ExposureModeAll
+		e.Mode = ExposureModeNone
 	}
 	if e.Active == nil {
 		e.Active = boolPtr(true)
@@ -520,7 +527,59 @@ type ServerConfig struct {
 	// is on by default EXCEPT the web UI, which is beta and therefore off until
 	// explicitly enabled (via web_ui or the experimental master switch).
 	Features FeaturesConfig `json:"features,omitempty" yaml:"features,omitempty"`
+
+	// Results configures the ephemeral results store: large tool/script outputs
+	// are written out-of-line and referenced by a compact handle instead of
+	// being inlined into the MCP response (reducing token overhead). Enabled by
+	// default; see ResultsConfig.
+	Results ResultsConfig `json:"results,omitempty" yaml:"results,omitempty"`
+
+	// MaxIntrospectionBytes caps the output of the API introspection tools
+	// (get_api_info, list_api_endpoints, get_api_operation, list_api_schemas,
+	// search_openapi_operations, export_openapi_config). Introspection tools
+	// paginate (list_api_endpoints/search_openapi_operations accept
+	// limit/offset), but a deliberately oversized request can still produce
+	// large JSON that dominates a model's context window, so outputs above the
+	// cap are rejected with narrowing guidance instead of being returned.
+	// 0 = default (128 KiB).
+	MaxIntrospectionBytes int `json:"max_introspection_bytes,omitempty" yaml:"max_introspection_bytes,omitempty"`
 }
+
+// DefaultServerIntrospectionMaxBytes is the default cap (bytes) on API
+// introspection tool outputs, applied when server.max_introspection_bytes is
+// unset or set to a non-positive value.
+const DefaultServerIntrospectionMaxBytes = 128 * 1024
+
+// EffectiveIntrospectionMaxBytes returns the introspection output cap,
+// defaulting to DefaultServerIntrospectionMaxBytes when unset.
+func (s ServerConfig) EffectiveIntrospectionMaxBytes() int {
+	if s.MaxIntrospectionBytes <= 0 {
+		return DefaultServerIntrospectionMaxBytes
+	}
+	return s.MaxIntrospectionBytes
+}
+
+// ResultsConfig configures the ephemeral results store.
+type ResultsConfig struct {
+	// Enabled turns the results store on/off. When disabled, tool results are
+	// always inlined regardless of size. When enabled (default) the store
+	// externalizes results above MaxInlineBytes. Absent = enabled.
+	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	// Dir is the storage directory. When empty, a per-process temp dir is used
+	// (results are ephemeral and never persisted as registrations).
+	Dir string `json:"dir,omitempty" yaml:"dir,omitempty"`
+	// MaxInlineBytes is the threshold above which a result is externalized and
+	// a handle is returned instead of the full payload. Default 64 KiB.
+	MaxInlineBytes int `json:"max_inline_bytes,omitempty" yaml:"max_inline_bytes,omitempty"`
+	// TTLS is how long a stored result lives, in seconds. Default 1800 (30 min).
+	TTLS int `json:"ttl_s,omitempty" yaml:"ttl_s,omitempty"`
+	// SweepIntervalS is how often expired results are purged, in seconds.
+	// Default 60.
+	SweepIntervalS int `json:"sweep_interval_s,omitempty" yaml:"sweep_interval_s,omitempty"`
+}
+
+// Active reports whether the results store is enabled (default true).
+func (r ResultsConfig) Active() bool { return r.Enabled == nil || *r.Enabled }
 
 // FeaturesConfig holds the feature flags. Each pointer is optional: an absent
 // flag means "default", which is true for every production feature and false
@@ -540,7 +599,7 @@ type FeaturesConfig struct {
 	APIRegistration *bool `json:"api_registration,omitempty" yaml:"api_registration,omitempty"`
 
 	// APIIntrospection gates the API documentation / introspection tools
-	// (describe_openapi_api, get_api_operation, list_api_schemas, ...).
+	// (get_api_info, list_api_endpoints, get_api_operation, ...).
 	// Default enabled.
 	APIIntrospection *bool `json:"api_introspection,omitempty" yaml:"api_introspection,omitempty"`
 

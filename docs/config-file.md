@@ -35,6 +35,8 @@ Optional top-level `server` block configures the MCP process itself:
 | --- | --- | --- | --- |
 | `port` | int | `--port` flag | Port the MCP HTTP server listens on. Overrides the `--port` flag. |
 | `log_level` | string | `--log-level` flag | Minimum log level (`debug`, `info`, `warn`, `error`). |
+| `results` | object | see below | Ephemeral external-results store for oversized tool/script outputs (see `results` object). |
+| `max_introspection_bytes` | int | 131072 | Backstop cap on a single API-introspection response (`get_api_info`, `list_api_endpoints`, `get_api_operation`, `list_api_schemas`, `search_openapi_operations`, `export_openapi_config`). Introspection tools paginate by default so large APIs are consumed in chunks; a request that would still exceed this cap (e.g. a huge explicit `limit`) is rejected with guidance to narrow the request instead of returned. Set to `0` to restore the 128 KiB default. |
 | `ui.enabled` | bool | off (beta) | Legacy switch for the web UI shell. An explicit `true` still serves it (backward compatible); an explicit `false` forces it off even when `features.web_ui` is on. |
 | `features` | object | see below | Feature flags (see `features` object). |
 
@@ -48,7 +50,7 @@ off until explicitly enabled.
 | `enabled` | bool | false | Master switch for the beta feature set (the web UI). Individual flags override it. |
 | `web_ui` | bool | false (beta) | Serve the browser web UI at `/ui` (static shell, manifest, chat, events, CopilotKit runtime). |
 | `api_registration` | bool | true | API/target registration & reload tools: `register_openapi_api`, `unregister_openapi_api`, `list_openapi_apis`, `reload_api`, `check_api_spec`, and the target-management tools. |
-| `api_introspection` | bool | true | API documentation & introspection tools: `describe_openapi_api`, `get_api_operation`, `list_api_schemas`, `search_openapi_operations`, `export_openapi_config`. |
+| `api_introspection` | bool | true | API documentation & introspection tools: `get_api_info`, `list_api_endpoints`, `get_api_operation`, `list_api_schemas`, `search_openapi_operations`, `export_openapi_config`. |
 | `api_exposure` | bool | true | Runtime tool-footprint tools: `update_api_exposure`, `update_session_api_exposure`, `clear_session_api_exposure`, `api_exposure`. |
 | `knowledge` | bool | true | Knowledge library tools: `knowledge_*`, `capabilities`, `discover_task`, `run_task`, `view`. |
 | `meta` | bool | true | Meta knowledge base tools: `meta_init`, `meta_status`, `meta_sync`, `meta_update_knowledge`. |
@@ -76,6 +78,45 @@ server:
     web_ui: true
     # ...or features.enabled: true to enable the whole beta set.
 ```
+
+### `results` object
+
+When enabled, tool/script outputs larger than `max_inline_bytes` are not
+returned inline in the MCP `call_tool` response. Instead the server stores the
+payload in a file-backed store and returns a compact handle payload
+(`{"handle": "r_...", "tool", "kind", "bytes", "expires_in_s", "truncated"}`).
+The client can then fetch it with the `results_get` tool, list the session's
+results with `results_list`, and purge entries with `results_cleanup` — keeping
+the response model (and the agent context) small.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | true | Master switch. When false all results are returned inline. |
+| `dir` | string | per-process temp dir | Directory holding the results store (handle metadata + payload files). Results are ephemeral by design; a persistent path just survives process restarts. |
+| `max_inline_bytes` | int | 65536 | Payloads above this size are externalized to a handle. |
+| `ttl_s` | int | 1800 | Seconds a stored result lives before the sweeper deletes it. |
+| `sweep_interval_s` | int | 60 | Seconds between background sweeps of expired results. |
+
+Example:
+
+```yaml
+server:
+  results:
+    dir: /var/lib/openapi-mcp/results
+    max_inline_bytes: 16384
+    ttl_s: 600
+```
+
+### `max_introspection_bytes` vs `results`
+
+The two are complementary. `results.max_inline_bytes` decides whether an
+already-produced output is inlined or externalized to a handle; it does not stop
+an introspection tool from *building* a full-spec dump. Introspection tools
+instead paginate by default (`list_api_endpoints` and
+`search_openapi_operations` accept `limit`/`offset` and report totals). The
+`max_introspection_bytes` cap is the backstop: a single request that would still
+produce an oversized page (e.g. a huge explicit `limit`) is rejected with
+narrowing guidance instead of returned.
 
 ## API object
 

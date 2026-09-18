@@ -17,6 +17,7 @@ import (
 	"github.com/ckanthony/openapi-mcp/pkg/logx"
 	"github.com/ckanthony/openapi-mcp/pkg/mcp"
 	"github.com/ckanthony/openapi-mcp/pkg/parser"
+	"github.com/ckanthony/openapi-mcp/pkg/results"
 )
 
 var regLog = logx.Module("registry")
@@ -75,8 +76,8 @@ type apiEntry struct {
 	// time. It is the fallback freshness signal when the source has no usable
 	// Last-Modified timestamp.
 	SpecETag string
-	ToolSet       *mcp.ToolSet // tools keyed by bare operation names
-	Doc           *mcp.ApiDoc  // normalized spec documentation for introspection
+	ToolSet  *mcp.ToolSet // tools keyed by bare operation names
+	Doc      *mcp.ApiDoc  // normalized spec documentation for introspection
 
 	// OpTags maps each bare operation id to its OpenAPI tags. It is built once
 	// at load from the ApiDoc and lets tag-level exposure toggles resolve to
@@ -175,6 +176,14 @@ type Registry struct {
 	monitorCtx    context.Context
 	monitorCancel context.CancelFunc
 	monitorWG     sync.WaitGroup
+
+	// results is the ephemeral results store (large tool/script outputs
+	// externalized as handle references). Lazily created from server.Results
+	// on first use; recreated when a config reload changes its directory.
+	results      *results.Store
+	resultsMu    sync.Mutex
+	resultsDir   string
+	resultsState string // "on" | "off" (config reload may disable)
 }
 
 // NewRegistry creates an empty registry. If persistPath is non-empty, runtime
@@ -197,11 +206,85 @@ func NewRegistry(persistPath string) *Registry {
 }
 
 // SetServerConfig records process-level server settings so they survive a
-// config-file rewrite.
+// config-file rewrite. If the results store exists and the configured results
+// directory (or enabled state) changed, the store is recreated lazily on next
+// use so runtime reloads take effect.
 func (r *Registry) SetServerConfig(s config.ServerConfig) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.resultsMu.Lock()
+	defer r.resultsMu.Unlock()
+
+	rc := s.Results
+	enabled := rc.Active()
+	r.resultsState = "off"
+	if enabled {
+		r.resultsState = "on"
+	}
+	if r.results != nil && (r.resultsState == "off" || r.resultsDir != rc.Dir) {
+		r.results.Close()
+		r.results = nil
+	}
 	r.server = s
+}
+
+// ResultsStore returns the ephemeral results store, lazily creating it from
+// the configured server.results options. It returns nil when the results
+// feature is disabled.
+func (r *Registry) ResultsStore() *results.Store {
+	r.resultsMu.Lock()
+	defer r.resultsMu.Unlock()
+	if r.resultsState == "off" {
+		return nil
+	}
+	if r.results != nil {
+		return r.results
+	}
+	rc := r.server.Results
+	opts := results.Options{
+		Dir:        rc.Dir,
+		MaxInline:  rc.MaxInlineBytes,
+		SweepEvery: time.Duration(rc.SweepIntervalS) * time.Second,
+	}
+	if rc.TTLS > 0 {
+		opts.TTL = time.Duration(rc.TTLS) * time.Second
+	}
+	st, err := results.New(opts)
+	if err != nil {
+		regLog.Error("failed to start ephemeral results store; results will be inlined", "error", err)
+		r.resultsState = "off"
+		return nil
+	}
+	r.results = st
+	r.resultsDir = rc.Dir
+	return st
+}
+
+// ExternalizeResult returns text unchanged when the results store is disabled
+// or the payload fits inline; otherwise it stores the text out-of-line and
+// returns the compact handle payload. tool/kind are recorded provenance.
+func (r *Registry) ExternalizeResult(connID, tool, kind, text string) string {
+	st := r.ResultsStore()
+	if st == nil || len(text) <= st.MaxInline() {
+		return text
+	}
+	h, err := st.Store(connID, tool, kind, []byte(text))
+	if err != nil {
+		regLog.Error("failed to externalize result; inlining", "tool", tool, "error", err)
+		return text
+	}
+	regLog.Debug("externalized large result", "tool", tool, "handle", h.ID, "bytes", h.Bytes)
+	return st.HandlePayloadText(h)
+}
+
+// CloseResultsStore stops the background sweeper, if running.
+func (r *Registry) CloseResultsStore() {
+	r.resultsMu.Lock()
+	defer r.resultsMu.Unlock()
+	if r.results != nil {
+		r.results.Close()
+		r.results = nil
+	}
 }
 
 // ServerConfig returns the configured server settings.
